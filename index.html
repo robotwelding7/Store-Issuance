@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WIP Store Picklist</title>
+<link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAZElEQVR42mNgwAHk4nv+UxMzEAOobSlJjqGX5VgdQW/LMRwxsh0wUJbDHYFPEh8gR92oA0YdMOqAoeeAAS+IRh1AbNy+aJfDiUcdMOqAUQcM/nJgtFU8KBww4F2zQdE5HajuOQAiPgKAfzao6AAAAABJRU5ErkJggg==">
+<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAACf0lEQVR42u3bwQ2CUBRFwV8JrVmOGwq1C40dGIzmcZiXnD1cZstaw2677U+dp3X1gwB4iAU3xIIbZIENsmKwfRAlUPsIysA2vDKoDa4MakMrg9rAyqA2rDKoDaoMakMqg9qASqE2njKgDacMaoMphdpYyoA2lFKojaQMaAMphdo4AlqaCNowSqE2ioCWJoI2iFKojSGgJaAloCWgBbQEtDQKtCGUQm0EAS0BLQEtAS2gJaB/3VnuSu8LNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw20BLSANoKAloCWgJaAFtAS0BLQEtAS0AJaAloCWgJaAlpAS0D7BevLHvdtfEADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMN9BHQ75v+kNLHmIEW0BLQEtAS0ALaIAJaGgkaaqUwAy2gpcmgoVYKM9ACWpoMGmqlMAOtHGiolcIMtHKgoVYKM9TKYQZaOdBQK4UZauUwQ60cZqiVwwy1cpihVg4z1Mphhlo5zGArBxlqJTGDrRxksJWEDLeSiOFWFjHwwP7rXiIt6USzABqRAAAAAElFTkSuQmCC">
+<link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAZElEQVR42mNgwAHk4nv+UxMzEAOobSlJjqGX5VgdQW/LMRwxsh0wUJbDHYFPEh8gR92oA0YdMOqAoeeAAS+IRh1AbNy+aJfDiUcdMOqAUQcM/nJgtFU8KBww4F2zQdE5HajuOQAiPgKAfzao6AAAAABJRU5ErkJggg==">
+<meta name="theme-color" content="#1e5f8c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="WIP Picklist">
 <style>
   :root {
     --primary:#1e5f8c; --primary-dark:#154a6e; --accent:#e8871e;
@@ -589,6 +595,13 @@ function setBadge(tab, n) {
   btn.innerHTML = esc(base) + (n > 0 ? ` <span class="dot">${n}</span>` : '');
 }
 
+// Nothing pushes updates to an idle tab, so without this the badge only
+// changes when someone happens to switch tabs. Poll gently in the
+// background instead - 10 minutes is frequent enough to feel "live" without
+// hammering Apps Script if several devices are left open all day.
+const BADGE_POLL_MS = 10 * 60 * 1000;
+setInterval(refreshBadges, BADGE_POLL_MS);
+
 /* ================= CREATE ================= */
 
 let shownProcs = [];
@@ -662,41 +675,65 @@ document.getElementById('btn-parent-apply-all').addEventListener('click', () => 
   showToast('All ' + inputs.length + ' Process No. set to ' + v);
 });
 
-let searchDebounce;
-document.getElementById('proc-search').addEventListener('input', () => {
-  clearTimeout(searchDebounce);
-  searchDebounce = setTimeout(runProcSearch, 300);
-});
+/**
+ * The whole BOM is small enough to hold in memory, so it's fetched once
+ * (on load, and again whenever the databank is edited) and searched locally
+ * from then on - no network round-trip per keystroke, no debounce needed.
+ * Falls back to a live server search only if the cache never loaded.
+ */
+let PROCESS_CACHE = null;
+let processCacheLoading = null;
+
+function processCacheEntries(bomProcesses) {
+  return bomProcesses.map(p => ({
+    code: p.processNo, model: p.model, partName: p.partName, subCount: p.subParts.length
+  }));
+}
+
+async function loadProcessCache(force) {
+  if (PROCESS_CACHE && !force) return PROCESS_CACHE;
+  if (processCacheLoading && !force) return processCacheLoading;
+  processCacheLoading = api('getBom')
+    .then(data => { PROCESS_CACHE = processCacheEntries(data.processes); return PROCESS_CACHE; })
+    .catch(err => { showToast('Could not load parts list: ' + err.message, true); return []; })
+    .finally(() => { processCacheLoading = null; });
+  return processCacheLoading;
+}
+
+document.getElementById('proc-search').addEventListener('input', runProcSearch);
 document.getElementById('proc-search').addEventListener('focus', runProcSearch);
 
 async function runProcSearch() {
-  const q = document.getElementById('proc-search').value.trim();
+  const q = document.getElementById('proc-search').value.trim().toLowerCase();
   const box = document.getElementById('proc-results');
   if (!q) { box.className = 'search-results'; box.innerHTML = ''; return; }
-  try {
-    const data = await api('searchProcesses', { q });
-    box.className = 'search-results open';
-    if (!data.processes.length) { box.innerHTML = '<div class="search-empty">Nothing matches that.</div>'; return; }
-    box.innerHTML = data.processes.map(p => {
-      const already = shownProcs.some(s => s.code === p.code);
-      return `<div class="search-item${already ? ' added' : ''}" data-add="${esc(p.code)}"
-                data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
-        <div class="sc">${esc(p.code)}${already ? ' &check; added' : ''}</div>
-        <div class="sn">${esc(fullName(p.model, p.partName))} &middot; ${p.subCount} sub part${p.subCount===1?'':'s'}</div>
-      </div>`;
-    }).join('');
-    box.querySelectorAll('[data-add]').forEach(it => {
-      it.addEventListener('click', () => {
-        const code = it.dataset.add;
-        if (shownProcs.some(p => p.code === code)) { showToast('Already in the list', true); return; }
-        shownProcs.push({ code, model:it.dataset.model, partName:it.dataset.name, isNew:true });
-        document.getElementById('proc-search').value = '';
-        box.className = 'search-results'; box.innerHTML = '';
-        renderRobotProcs();
-        showToast(code + ' added');
-      });
+
+  const cache = await loadProcessCache();
+  const matches = cache.filter(p =>
+    p.code.toLowerCase().includes(q) || fullName(p.model, p.partName).toLowerCase().includes(q)
+  ).slice(0, 40);
+
+  box.className = 'search-results open';
+  if (!matches.length) { box.innerHTML = '<div class="search-empty">Nothing matches that.</div>'; return; }
+  box.innerHTML = matches.map(p => {
+    const already = shownProcs.some(s => s.code === p.code);
+    return `<div class="search-item${already ? ' added' : ''}" data-add="${esc(p.code)}"
+              data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
+      <div class="sc">${esc(p.code)}${already ? ' &check; added' : ''}</div>
+      <div class="sn">${esc(fullName(p.model, p.partName))} &middot; ${p.subCount} sub part${p.subCount===1?'':'s'}</div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-add]').forEach(it => {
+    it.addEventListener('click', () => {
+      const code = it.dataset.add;
+      if (shownProcs.some(p => p.code === code)) { showToast('Already in the list', true); return; }
+      shownProcs.push({ code, model:it.dataset.model, partName:it.dataset.name, isNew:true });
+      document.getElementById('proc-search').value = '';
+      box.className = 'search-results'; box.innerHTML = '';
+      renderRobotProcs();
+      showToast(code + ' added');
     });
-  } catch (err) { showToast('Search failed: ' + err.message, true); }
+  });
 }
 
 document.getElementById('btn-add-queue').addEventListener('click', () => {
@@ -743,6 +780,17 @@ function renderQueue() {
     b.addEventListener('click', () => { queued.splice(Number(b.dataset.q),1); renderQueue(); }));
 }
 
+// If every queued Process No. is a small qty, ask once whether this batch
+// should be labelled as a mini-market pack order. Qty alone isn't a safe
+// signal on its own (a robot can legitimately run a small last batch), so
+// this stays a one-tap confirmation rather than an automatic decision -
+// and the answer is written to the sheet so the label stays put on reload.
+const PACK_QTY_THRESHOLD = 50;
+
+function suggestsPackOrder() {
+  return queued.length > 0 && queued.every(q => Number(q.qty) < PACK_QTY_THRESHOLD);
+}
+
 document.getElementById('btn-preview').addEventListener('click', async () => {
   const date = document.getElementById('create-date').value;
   const name = document.getElementById('create-name').value.trim();
@@ -758,6 +806,12 @@ document.getElementById('btn-preview').addEventListener('click', async () => {
     if (data.notFound && data.notFound.length) showToast('No BOM entry for: ' + data.notFound.join(', '), true);
     preview = data.preview;
     if (!preview.length) return;
+
+    const isPack = suggestsPackOrder() &&
+      confirm('This looks like a small mini-market order (all under ' + PACK_QTY_THRESHOLD + ' qty).\n\n' +
+              'Label it as a Pack order? Store will see "Pack Ready" instead of "Rack Ready".');
+    preview.forEach(p => p.orderType = isPack ? 'Pack' : '');
+
     renderPreview();
     const card = document.getElementById('preview-card');
     card.style.display = 'block';
@@ -986,6 +1040,9 @@ function decisionPanel(rack, pr) {
 
 function rackCard(rack, mode) {
   const key = rackKey(rack);
+  const isPack = rack.orderType === 'Pack';
+  const readyLabel = isPack ? 'Pack Ready' : 'Rack Ready';
+  const collectLabel = isPack ? 'Pack Collected' : 'Collect Rack';
   // Location view exists so store can walk the floor area by area. The picker
   // is just taking a finished rack, so Collect always uses the tree.
   const view = mode === 'store' ? (rackView[key] || 'process') : 'process';
@@ -997,11 +1054,11 @@ function rackCard(rack, mode) {
 
   let action;
   if (mode === 'store') {
-    action = `<button class="btn btn-ready btn-small" data-ready="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" ${allPicked ? '' : 'disabled'}>Rack Ready</button>`;
+    action = `<button class="btn btn-ready btn-small" data-ready="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" ${allPicked ? '' : 'disabled'}>${readyLabel}</button>`;
   } else {
     action = rack.needsDecision
       ? `<button class="btn btn-collect btn-small" disabled>Waiting on decision</button>`
-      : `<button class="btn btn-collect btn-small" data-collect="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}">Collect Rack</button>`;
+      : `<button class="btn btn-collect btn-small" data-collect="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}">${collectLabel}</button>`;
   }
 
   const decisions = (mode === 'collect' && rack.needsDecision)
@@ -1017,13 +1074,14 @@ function rackCard(rack, mode) {
       <div>
         <div class="title">${esc(rack.robot)}
           <span class="badge badge-${String(rack.status).toLowerCase()}">${esc(rack.status)}</span>
+          ${isPack ? '<span class="badge badge-revised">pack order</span>' : ''}
           ${rack.needsDecision ? '<span class="badge badge-short">needs decision</span>' : ''}
           ${rack.wasRevised && !rack.needsDecision ? '<span class="badge badge-revised">revised</span>' : ''}
           ${shortCount ? `<span class="badge badge-short">${shortCount} short</span>` : ''}
           ${customCount ? `<span class="badge badge-custom">${customCount} custom qty</span>` : ''}
         </div>
         <div class="sub">${esc(rack.liveProcesses.map(p => p.processNo).join(', '))} &middot; ${total} sub parts</div>
-        <div class="progress${allPicked ? ' done' : ''}"><strong>${done}/${total}</strong> ${allPicked ? 'all ticked' : 'ticked'}${!allPicked && mode === 'store' ? ' — tick everything to enable Rack Ready' : ''}</div>
+        <div class="progress${allPicked ? ' done' : ''}"><strong>${done}/${total}</strong> ${allPicked ? 'all ticked' : 'ticked'}${!allPicked && mode === 'store' ? ' — tick everything to enable ' + readyLabel : ''}</div>
         ${droppedNote}
       </div>
       <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
@@ -1379,6 +1437,7 @@ function renderDatabank() {
         await api('deleteProcess', { processNo: code });
         showToast(code + ' deleted');
         await loadDatabank();
+        loadProcessCache(true); // BOM changed - refresh the search cache
       } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
     }));
 }
@@ -1446,6 +1505,7 @@ document.getElementById('btn-save-parent').addEventListener('click', async () =>
     document.getElementById('modal-back').classList.remove('open');
     showToast(code + ' saved with ' + subParts.length + ' sub part(s)');
     await loadDatabank();
+        loadProcessCache(true); // BOM changed - refresh the search cache
   } catch (err) {
     showToast('Failed: ' + err.message, true);
   } finally {
@@ -1459,6 +1519,7 @@ if (API_URL.indexOf('PASTE_YOUR') !== -1) {
   showToast('API_URL is not set yet — edit it at the top of this file', true);
 }
 loadRobots();
+loadProcessCache();
 if (ROLE) applyRole(ROLE);
 else document.getElementById('role-back').classList.add('open');
 </script>
