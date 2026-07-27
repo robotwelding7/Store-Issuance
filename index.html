@@ -1,725 +1,1467 @@
-/**
- * WIP STORE PICKLIST SYSTEM — Google Sheet backend (v7)
- *
- * Full port of the simulator: rack per robot, Process No. tree, location
- * grouping, shortage flagging with the partial / drop / cancel decision
- * flow, custom-qty detection, and the databank editor.
- *
- * ---------------------------------------------------------------------
- * TERMINOLOGY (floor language)
- *   Process No.  = the item being built      (ProcessNo)
- *   Model        = machine family, e.g. B17  (Model)
- *   Part Name    = descriptive name          (PartName)
- *   Sub Part     = component pulled for it   (SubPartCode)
- * ---------------------------------------------------------------------
- *
- * SHEET 1: "BOM"
- *   Model | ProcessNo | PartName | SubPartCode | QtyPerUnit | Location
- *
- * SHEET 2: "Picklist"  (system writes — don't edit by hand)
- *   see PICK_H below — 28 columns
- *
- * DEPLOY: Extensions > Apps Script > paste > Deploy > New deployment
- *   Web app / Execute as: Me / Who has access: Anyone
- *   Sheet timezone must be Kuala Lumpur (File > Settings > Time zone)
- */
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WIP Store Picklist</title>
+<style>
+  :root {
+    --primary:#1e5f8c; --primary-dark:#154a6e; --accent:#e8871e;
+    --bg:#f2f4f7; --card:#fff; --text:#1f2937; --muted:#6b7280;
+    --border:#e2e5e9; --pending:#94a3b8; --ready:#e8871e;
+    --collected:#2e9e5b; --danger:#d64545; --warn:#b45309; --warn-bg:#fef3c7;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
 
-const SHEET_BOM = 'BOM';
-const SHEET_PICKLIST = 'Picklist';
-const LOOKBACK = 10;
+  header { background:var(--primary); color:#fff; padding:12px 18px;
+           display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  header .subtitle { font-size:11px; opacity:.85; margin-top:2px; }
+  .head-right { display:flex; align-items:center; gap:10px; }
+  .icon-btn { background:rgba(255,255,255,.15); border:none; color:#fff; width:34px; height:34px;
+              border-radius:8px; cursor:pointer; font-size:16px; display:flex;
+              align-items:center; justify-content:center; }
+  .icon-btn:hover { background:rgba(255,255,255,.28); }
 
-const PICK_H = [
-  'RowID', 'BatchID', 'Date', 'Robot', 'Model', 'ProcessNo', 'PartName',
-  'OriginalQtyProcess', 'QtyProcess', 'SubPartCode', 'QtyPerUnit',
-  'OriginalRequiredQty', 'RequiredQty', 'IssuedQty', 'Location', 'Picked',
-  'ShortageRemark', 'DecisionStatus', 'DecisionBy', 'DecisionAt', 'DecisionType',
-  'Status', 'CreatedBy', 'CreatedTimestamp', 'ReadyBy', 'ReadyTimestamp',
-  'CollectedBy', 'CollectedTimestamp'
-];
+  .role-bar { background:var(--primary-dark); color:rgba(255,255,255,.8); font-size:12px;
+              padding:7px 18px; display:flex; justify-content:space-between; align-items:center; }
+  .role-bar strong { color:#fff; }
+  .role-bar button { background:none; border:none; color:#fff; text-decoration:underline;
+                     cursor:pointer; font-size:12px; padding:0; }
 
-/* ============================================================ routing */
+  nav { display:flex; background:var(--primary-dark); overflow-x:auto;
+        border-top:1px solid rgba(255,255,255,.08); }
+  nav button { flex:1; min-width:100px; padding:13px 6px; background:none; border:none;
+               color:rgba(255,255,255,.65); font-size:13px; font-weight:600; cursor:pointer;
+               border-bottom:3px solid transparent; white-space:nowrap; }
+  nav button.active { color:#fff; border-bottom:3px solid var(--accent); background:rgba(255,255,255,.05); }
+  nav button .dot { display:inline-block; min-width:19px; height:19px; line-height:19px;
+                    background:var(--danger); color:#fff; border-radius:10px; font-size:11px;
+                    font-weight:700; margin-left:6px; padding:0 5px; }
 
-function doGet(e) { return route(e.parameter || {}); }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border-radius:10px; padding:18px; margin-bottom:14px;
+          box-shadow:0 1px 3px rgba(0,0,0,.06); border:1px solid var(--border); }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:14px 0 6px; }
+  label:first-child { margin-top:0; }
+  select, input { width:100%; padding:12px; font-size:15px; border:1px solid var(--border);
+                  border-radius:8px; background:#fff; color:var(--text); font-family:inherit; }
+  select:focus, input:focus { outline:none; border-color:var(--primary); }
+  .btn { width:100%; padding:14px; font-size:16px; font-weight:700; border:none;
+         border-radius:8px; cursor:pointer; margin-top:16px; }
+  .btn-primary { background:var(--primary); color:#fff; }
+  .btn-secondary { background:#fff; color:var(--primary); border:2px solid var(--primary); }
+  .btn-ready { background:var(--ready); color:#fff; }
+  .btn-collect { background:var(--collected); color:#fff; }
+  .btn-danger { background:#fff; color:var(--danger); border:2px solid var(--danger); }
+  .btn-small { width:auto; padding:9px 16px; font-size:13px; margin-top:0; border-radius:6px; }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
 
-function doPost(e) {
-  var p = {};
+  .part-row { display:flex; align-items:center; gap:10px; border:1px solid var(--border);
+              border-radius:8px; padding:10px 12px; margin-bottom:8px; background:#fff; }
+  .part-row .info { flex:1; min-width:0; }
+  .part-row .code { font-size:15px; font-weight:600; }
+  .part-row .meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .qty-input { width:84px; padding:9px; text-align:center; margin:0; }
+  .rm-btn { background:none; border:none; color:var(--danger); font-size:20px;
+            cursor:pointer; padding:0 4px; line-height:1; }
+
+  .search-add { margin-top:12px; position:relative; }
+  .search-results { margin-top:6px; max-height:260px; overflow-y:auto;
+                    border:1px solid var(--border); border-radius:8px; display:none; }
+  .search-results.open { display:block; }
+  .search-item { padding:12px 13px; border-bottom:1px solid var(--border); cursor:pointer; }
+  .search-item:last-child { border-bottom:none; }
+  .search-item:hover { background:#eef4f9; }
+  .search-item .sc { font-size:15px; font-weight:700; }
+  .search-item .sn { font-size:12px; color:var(--muted); margin-top:2px; }
+  .search-item.added { opacity:.45; }
+  .search-empty { padding:14px; text-align:center; color:var(--muted); font-size:13px; }
+
+  .rack { border:1px solid var(--border); border-radius:10px; margin-bottom:14px;
+          overflow:hidden; background:#fff; }
+  .rack-head { padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);
+               display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  .rack-head .title { font-size:18px; font-weight:700; }
+  .rack-head .sub { font-size:12px; color:var(--muted); margin-top:3px; }
+  .rack-body { padding:14px 16px; }
+  .progress { font-size:12px; margin-top:5px; font-weight:600; color:var(--muted); }
+  .progress strong { color:var(--primary); }
+  .progress.done strong { color:var(--collected); }
+  .view-toggle { display:flex; border:1px solid var(--border); border-radius:7px;
+                 overflow:hidden; background:#fff; }
+  .view-toggle button { border:none; background:#fff; padding:8px 13px; font-size:12px;
+                        font-weight:600; color:var(--muted); cursor:pointer; }
+  .view-toggle button.on { background:var(--primary); color:#fff; }
+
+  .proc-block { border:1px solid var(--border); border-radius:9px; margin-bottom:10px; overflow:hidden; }
+  .proc-head { display:flex; align-items:center; gap:11px; padding:12px 13px;
+               background:#f4f7fa; cursor:pointer; user-select:none; }
+  .proc-head:hover { background:#eaf0f6; }
+  .proc-chev { color:var(--muted); font-size:12px; width:12px; flex-shrink:0; }
+  .proc-code { font-size:17px; font-weight:800; }
+  .proc-name { font-size:12px; font-weight:600; color:var(--primary); margin-left:8px;
+               text-transform:uppercase; letter-spacing:.4px; }
+  .proc-meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .proc-body { padding:8px 13px 11px 13px; }
+  .proc-body.hidden { display:none; }
+
+  .sub-line { display:flex; align-items:center; gap:10px; padding:10px 11px; margin-bottom:7px;
+              border:1px solid var(--border); border-radius:8px; background:#fff;
+              cursor:pointer; user-select:none; transition:background .12s, border-color .12s; }
+  .sub-line:hover { background:#f8fafc; }
+  .sub-line.picked { background:#f2f8f4; border-color:#bfe0cb; }
+  .sub-line.picked .sub-code { text-decoration:line-through; color:var(--muted); }
+  .sub-line.custom { border-color:#f0d089; background:#fffdf5; }
+  .sub-line.custom .sub-qty { color:var(--warn); }
+  .sub-arrow { color:#b6c2cf; font-size:14px; flex-shrink:0; }
+  .sub-code { font-size:15px; font-weight:600; }
+  .sub-meta { font-size:12px; color:var(--muted); margin-top:2px; }
+  .sub-qty { font-size:17px; font-weight:700; color:var(--primary); flex-shrink:0; }
+  .sub-line.picked .sub-qty { color:var(--muted); }
+  .sub-line .info { flex:1; min-width:0; }
+  .pick-box { width:26px; height:26px; border:2px solid #c8d2dc; border-radius:6px;
+              flex-shrink:0; display:flex; align-items:center; justify-content:center;
+              font-size:15px; font-weight:700; color:#fff; background:#fff; }
+  .picked > .pick-box, .pick-box.on { background:var(--collected); border-color:var(--collected); }
+  .pick-box.partial { background:#fff; border-color:var(--collected); color:var(--collected); }
+
+  .loc-header { display:flex; align-items:center; gap:9px; margin:16px 0 8px;
+                font-size:12px; font-weight:700; color:var(--primary); text-transform:uppercase; }
+  .loc-header:first-child { margin-top:0; }
+  .loc-header .line { flex:1; height:1px; background:var(--border); }
+
+  .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px;
+           font-weight:700; text-transform:uppercase; }
+  .badge-pending { background:#eef0f3; color:var(--pending); }
+  .badge-ready { background:#fdecd8; color:var(--ready); }
+  .badge-collected { background:#dff3e6; color:var(--collected); }
+  .badge-cancelled { background:#e9e9ec; color:#6b7280; }
+  .badge-short { background:#fbe3e3; color:var(--danger); margin-left:6px; }
+  .badge-custom { background:var(--warn-bg); color:var(--warn); margin-left:6px; }
+  .badge-revised { background:#e6f0f8; color:var(--primary); margin-left:6px; }
+  .badge-dropped { background:#e9e9ec; color:#6b7280; margin-left:6px; }
+
+  .short-note { background:#fbe3e3; border-left:3px solid var(--danger); padding:8px 10px;
+                border-radius:0 6px 6px 0; font-size:12px; color:#8a2b2b; margin-top:6px; }
+  .revise-box { margin:2px 0 10px 37px; }
+  .revise-inner { border:1px dashed var(--border); border-radius:8px; padding:10px;
+                  margin-top:6px; display:none; }
+  .revise-inner.open { display:block; }
+  .revise-inner .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .revise-inner .row input[type=text] { flex:1; min-width:150px; }
+  .link-btn { background:none; border:none; color:var(--primary); font-size:12px;
+              cursor:pointer; padding:3px 0; font-weight:600; text-decoration:underline; }
+
+  .decision-panel { border:2px solid #f0b8b8; background:#fff8f8; border-radius:9px;
+                    padding:14px; margin-bottom:12px; }
+  .decision-panel h4 { margin:0 0 4px; font-size:15px; color:#8a2b2b; }
+  .decision-panel .why { font-size:12px; color:#8a2b2b; margin-bottom:10px; }
+  .decision-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .decision-actions .btn { flex:1; min-width:150px; margin-top:0; font-size:13px; padding:11px; }
+
+  .empty-state { text-align:center; padding:30px 20px; color:var(--muted); font-size:14px; }
+  .loading { text-align:center; padding:20px; color:var(--muted); font-size:13px; }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+           background:var(--text); color:#fff; padding:12px 22px; border-radius:8px;
+           font-size:14px; opacity:0; transition:opacity .25s; pointer-events:none;
+           z-index:300; max-width:90%; text-align:center; }
+  .toast.show { opacity:1; }
+  .toast.error { background:var(--danger); }
+
+  .filters { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+  .filters select, .filters input { flex:1; min-width:130px; }
+  .group-header { font-size:13px; font-weight:700; color:var(--primary);
+                  margin:18px 0 8px; text-transform:uppercase; }
+  .group-header:first-child { margin-top:0; }
+  .alert-banner { background:#fbe3e3; border:1px solid #f0b8b8; color:#8a2b2b;
+                  padding:12px 14px; border-radius:8px; font-size:13px; margin-bottom:14px; }
+  .info-banner { background:#e6f0f8; border:1px solid #b9d4ea; color:#154a6e;
+                 padding:12px 14px; border-radius:8px; font-size:13px; margin-bottom:12px; }
+  .warn-banner { background:var(--warn-bg); border:1px solid #f0d089; color:var(--warn);
+                 padding:11px 13px; border-radius:8px; font-size:12px; margin-bottom:12px; }
+  .apply-all { display:flex; gap:8px; align-items:center; margin-bottom:12px;
+               background:#f8fafc; padding:10px 12px; border-radius:8px;
+               border:1px solid var(--border); flex-wrap:wrap; }
+  .apply-all span { font-size:13px; font-weight:600; color:var(--muted); }
+
+  .hist-row { border:1px solid var(--border); border-radius:10px; margin-bottom:10px;
+              background:#fff; overflow:hidden; }
+  .hist-head { padding:14px 16px; display:flex; justify-content:space-between;
+               align-items:center; gap:12px; cursor:pointer; }
+  .hist-head:hover { background:#f8fafc; }
+  .hist-head .title { font-size:16px; font-weight:700; }
+  .hist-head .sub { font-size:12px; color:var(--muted); margin-top:3px; }
+  .hist-body { display:none; padding:0 16px 14px; border-top:1px solid var(--border); }
+  .hist-body.open { display:block; }
+  .chev { color:var(--muted); font-size:12px; margin-left:8px; white-space:nowrap; }
+
+  .modal-back { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none;
+                align-items:center; justify-content:center; padding:16px; z-index:250; }
+  .modal-back.open { display:flex; }
+  .modal { background:#fff; border-radius:12px; width:100%; max-width:620px;
+           max-height:88vh; overflow-y:auto; padding:20px; }
+  .modal h3 { margin:0 0 4px; font-size:17px; }
+  .modal .sub { font-size:12px; color:var(--muted); margin-bottom:12px; }
+  .modal-actions { display:flex; gap:10px; margin-top:16px; }
+  .modal-actions .btn { margin-top:0; }
+  .role-choice { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+  .role-choice button { flex:1; min-width:130px; padding:18px 12px; border-radius:10px;
+                        border:2px solid var(--border); background:#fff; cursor:pointer;
+                        font-size:15px; font-weight:700; color:var(--text); }
+  .role-choice button:hover { border-color:var(--primary); color:var(--primary); }
+  .role-choice small { display:block; font-weight:500; font-size:11px; color:var(--muted); margin-top:4px; }
+
+  .stat-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .stat { flex:1; min-width:110px; background:#f8fafc; border:1px solid var(--border);
+          border-radius:8px; padding:12px; text-align:center; }
+  .stat .num { font-size:22px; font-weight:700; color:var(--primary); }
+  .stat .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; margin-top:2px; }
+
+  @media (max-width: 520px) {
+    .proc-code { font-size:15px; }
+    .proc-name { display:block; margin-left:0; margin-top:2px; }
+    .sub-qty { font-size:15px; }
+    .rack-head .title { font-size:16px; }
+    .revise-box { margin-left:0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>WIP Store Picklist</h1>
+    <div class="subtitle">One rack per robot</div>
+  </div>
+  <div class="head-right">
+    <button class="icon-btn" id="btn-databank" title="Databank">&#9881;</button>
+  </div>
+</header>
+
+<div class="role-bar">
+  <span>Signed in as <strong id="role-label">—</strong></span>
+  <button id="btn-change-role">Change</button>
+</div>
+
+<nav id="main-nav">
+  <button class="tab-btn active" data-tab="create">Create</button>
+  <button class="tab-btn" data-tab="store">Store</button>
+  <button class="tab-btn" data-tab="collect">Collect</button>
+  <button class="tab-btn" data-tab="history">History</button>
+</nav>
+
+<main>
+
+  <!-- CREATE -->
+  <section id="tab-create" class="tab-panel">
+    <div class="card">
+      <label for="create-date">Date</label>
+      <input type="date" id="create-date">
+      <label for="create-name">Picker Name</label>
+      <input type="text" id="create-name" placeholder="Your name">
+
+      <label for="robot-input">Robot</label>
+      <input list="robot-list" id="robot-input" placeholder="e.g. R17 — type a new one or pick a known one" autocomplete="off">
+      <datalist id="robot-list"></datalist>
+      <div class="hint">The system remembers which Process No. each robot runs. Sub parts are always pulled from the BOM.</div>
+
+      <div id="robot-parts-card" style="display:none; margin-top:14px;">
+        <div id="robot-banner"></div>
+        <div class="apply-all">
+          <span>Same qty for all</span>
+          <input type="number" id="parent-all-qty" min="1" class="qty-input" placeholder="Qty">
+          <button class="btn btn-secondary btn-small" id="btn-parent-apply-all">Apply to all</button>
+        </div>
+        <div id="robot-parts-list"></div>
+
+        <div class="search-add">
+          <input type="text" id="proc-search" placeholder="Type to search Process No., model or part name..." autocomplete="off">
+          <div id="proc-results" class="search-results"></div>
+        </div>
+
+        <button class="btn btn-secondary" id="btn-add-queue">Add to Picklist</button>
+      </div>
+
+      <div id="queue-wrap" style="display:none; margin-top:20px;">
+        <label style="margin-top:0;">Queued for today</label>
+        <div id="queue-list"></div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-preview">Preview Picklist</button>
+    </div>
+
+    <div class="card" id="preview-card" style="display:none;">
+      <label style="margin-top:0;">Review before submitting</label>
+      <div class="warn-banner" id="custom-warn" style="display:none;"></div>
+      <div class="apply-all">
+        <span>Set all sub part qty to</span>
+        <input type="number" id="apply-all-qty" min="0" class="qty-input" placeholder="Qty">
+        <button class="btn btn-secondary btn-small" id="btn-apply-all">Apply to all</button>
+      </div>
+      <div id="preview-list"></div>
+      <button class="btn btn-primary" id="btn-submit">Confirm &amp; Send to Store</button>
+      <button class="btn btn-secondary" id="btn-back">Back</button>
+    </div>
+  </section>
+
+  <!-- STORE -->
+  <section id="tab-store" class="tab-panel" style="display:none;">
+    <div class="card">
+      <label for="store-date">Date</label>
+      <input type="date" id="store-date">
+      <label for="store-name">Your Name (Store)</label>
+      <input type="text" id="store-name" placeholder="Your name">
+    </div>
+    <div id="store-list"></div>
+  </section>
+
+  <!-- COLLECT -->
+  <section id="tab-collect" class="tab-panel" style="display:none;">
+    <div class="card">
+      <label for="collect-date">Date</label>
+      <input type="date" id="collect-date">
+      <label for="collect-name">Your Name (Picker)</label>
+      <input type="text" id="collect-name" placeholder="Your name">
+    </div>
+    <div id="collect-list"></div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" class="tab-panel" style="display:none;">
+    <div class="filters">
+      <input type="date" id="hist-from">
+      <input type="date" id="hist-to">
+      <select id="hist-status">
+        <option value="">All status</option>
+        <option value="Pending">Pending</option>
+        <option value="Ready">Ready</option>
+        <option value="Collected">Collected</option>
+        <option value="Cancelled">Cancelled</option>
+      </select>
+    </div>
+    <div class="filters">
+      <label style="margin:0; display:flex; align-items:center; gap:8px; font-weight:600;">
+        <input type="checkbox" id="hist-short" style="width:auto;"> Shortages only
+      </label>
+      <button class="btn btn-secondary btn-small" id="btn-hist-refresh">Refresh</button>
+    </div>
+    <div id="history-list"></div>
+  </section>
+
+  <!-- DATABANK -->
+  <section id="tab-databank" class="tab-panel" style="display:none;">
+    <div class="card">
+      <div class="stat-row">
+        <div class="stat"><div class="num" id="stat-parents">0</div><div class="lbl">Process No.</div></div>
+        <div class="stat"><div class="num" id="stat-rows">0</div><div class="lbl">Sub part links</div></div>
+      </div>
+      <div class="filters">
+        <input type="text" id="db-search" placeholder="Search process no., part name or sub part...">
+        <button class="btn btn-primary btn-small" id="btn-new-parent">+ New Process No.</button>
+      </div>
+      <div id="db-list"></div>
+      <div class="hint">The BOM lives in the Google Sheet — changes here write straight to it.</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- PIN -->
+<div class="modal-back" id="pin-back">
+  <div class="modal" style="max-width:360px;">
+    <h3>Databank</h3>
+    <div class="sub">Enter the PIN to edit the databank.</div>
+    <input type="password" id="pin-input" placeholder="PIN" inputmode="numeric">
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btn-pin-ok">Open</button>
+      <button class="btn btn-secondary" id="btn-pin-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ROLE -->
+<div class="modal-back" id="role-back">
+  <div class="modal" style="max-width:460px;">
+    <h3>Who is using this device?</h3>
+    <div class="sub">This decides which tabs are shown. Change it any time from the bar at the top.</div>
+    <div class="role-choice">
+      <button data-role="picker">Picker<small>Create &amp; Collect</small></button>
+      <button data-role="store">Store<small>Store tab only</small></button>
+      <button data-role="both">Supervisor<small>Everything</small></button>
+    </div>
+  </div>
+</div>
+
+<!-- PROCESS EDIT -->
+<div class="modal-back" id="modal-back">
+  <div class="modal">
+    <h3 id="modal-title">Edit Process No.</h3>
+    <div class="sub">Sub parts here are pulled automatically when this Process No. is picked. Location is free text — use whatever the store uses (BASKET, A-03, Rack 2 Row 1).</div>
+    <label for="m-proc-code">Process No.</label>
+    <input type="text" id="m-proc-code" placeholder="e.g. YM225-15">
+    <label for="m-model">Model</label>
+    <input type="text" id="m-model" placeholder="e.g. B17">
+    <label for="m-part-name">Part Name</label>
+    <input type="text" id="m-part-name" placeholder="e.g. Stay Fender">
+    <div class="hint">Shown as "Model + Part Name", e.g. B17 STAY FENDER</div>
+    <label>Sub parts</label>
+    <div id="m-children"></div>
+    <button class="btn btn-secondary btn-small" id="btn-add-child" style="margin-top:8px;">+ Add sub part</button>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btn-save-parent">Save</button>
+      <button class="btn btn-secondary" id="btn-close-modal">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============ CONFIGURE THIS ============
+// Must be one single line, in quotes, ending in /exec
+const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+const DATABANK_PIN = '1234';
+// ========================================
+
+/* ---------------- helpers ---------------- */
+
+function esc(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function todayStr() {
+  const d = new Date(), pad = n => String(n).padStart(2,'0');
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
+}
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('en-MY',
+    { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+}
+function showToast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { t.className = 'toast'; }, 3200);
+}
+function rememberName(id, key) {
+  const el = document.getElementById(id);
   try {
-    if (e.postData && e.postData.contents) p = JSON.parse(e.postData.contents);
-  } catch (err) { p = e.parameter || {}; }
-  return route(p);
+    const s = localStorage.getItem(key);
+    if (s) el.value = s;
+    el.addEventListener('change', () => localStorage.setItem(key, el.value.trim()));
+  } catch (e) {}
 }
-
-function route(p) {
-  try {
-    var r;
-    switch (p.action) {
-      // create
-      case 'getRobots':          r = getRobots(); break;
-      case 'getRecentProcesses': r = getRecentProcesses(p); break;
-      case 'searchProcesses':    r = searchProcesses(p); break;
-      case 'previewPicklist':    r = previewPicklist(p); break;
-      case 'submitPicklist':     r = submitPicklist(p); break;
-      // store / collect
-      case 'getRacks':           r = getRacks(p); break;
-      case 'setPicked':          r = setPicked(p); break;
-      case 'setProcessPicked':   r = setProcessPicked(p); break;
-      case 'markRackReady':      r = markRackStatus(p, 'Ready'); break;
-      case 'markRackCollected':  r = markRackStatus(p, 'Collected'); break;
-      case 'flagShortage':       r = flagShortage(p); break;
-      case 'applyDecision':      r = applyDecision(p); break;
-      // history
-      case 'getHistory':         r = getHistory(p); break;
-      // databank
-      case 'getBom':             r = getBom(); break;
-      case 'saveProcess':        r = saveProcess(p); break;
-      case 'deleteProcess':      r = deleteProcess(p); break;
-      default: r = { success:false, error:'Unknown action: ' + p.action };
-    }
-    return json(r);
-  } catch (err) {
-    return json({ success:false, error: err.message });
-  }
-}
-
-function json(o) {
-  return ContentService.createTextOutput(JSON.stringify(o))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function sheet(name) {
-  var s = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
-  if (!s) throw new Error('Sheet not found: ' + name);
-  return s;
-}
-function tz() { return Session.getScriptTimeZone(); }
-
-/**
- * Sheets stores a submitted "yyyy-MM-dd" as a real Date, which comes back
- * out as a UTC ISO string (shifted by the +8 offset). Normalise anything
- * back to a plain local yyyy-MM-dd so comparisons hold.
- */
-function ymd(v) {
-  if (v instanceof Date) return Utilities.formatDate(v, tz(), 'yyyy-MM-dd');
-  var s = (v || '').toString().trim();
-  if (!s) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  var d = new Date(s);
-  if (!isNaN(d.getTime())) return Utilities.formatDate(d, tz(), 'yyyy-MM-dd');
-  return s;
-}
-function fullName(model, partName) {
-  return [model, partName].filter(function (x) { return x; }).join(' ');
-}
-function truthy(v) { return v === true || v === 'TRUE' || v === 'true'; }
-
-/* =============================================================== BOM */
-
-function readBom() {
-  var data = sheet(SHEET_BOM).getDataRange().getValues();
-  var rows = [];
-  for (var i = 1; i < data.length; i++) {
-    var r = data[i];
-    if (!r[1] || !r[3]) continue;
-    rows.push({
-      _row: i + 1,
-      model:       String(r[0] || '').trim(),
-      processNo:   String(r[1]).trim(),
-      partName:    String(r[2] || '').trim(),
-      subPartCode: String(r[3]).trim(),
-      qtyPerUnit:  Number(r[4]) || 1,
-      location:    String(r[5] || '').trim()
-    });
-  }
-  return rows;
-}
-
-function allProcesses(bom) {
-  bom = bom || readBom();
-  var seen = {}, out = [];
-  bom.forEach(function (r) {
-    if (!seen[r.processNo]) {
-      seen[r.processNo] = true;
-      out.push({ code:r.processNo, model:r.model, partName:r.partName, subCount:0 });
-    }
-  });
-  var counts = {};
-  bom.forEach(function (r) { counts[r.processNo] = (counts[r.processNo] || 0) + 1; });
-  out.forEach(function (p) { p.subCount = counts[p.code] || 0; });
-  out.sort(function (a,b) { return a.code.localeCompare(b.code); });
-  return out;
-}
-
-/** Server-side filter so a phone never has to hold the whole BOM. */
-function searchProcesses(p) {
-  var q = String(p.q || '').trim().toLowerCase();
-  var procs = allProcesses();
-  if (q) {
-    procs = procs.filter(function (proc) {
-      return proc.code.toLowerCase().indexOf(q) !== -1 ||
-             fullName(proc.model, proc.partName).toLowerCase().indexOf(q) !== -1;
-    });
-  }
-  return { success:true, processes: procs.slice(0, 40) };
-}
-
-/** Whole BOM grouped by Process No., for the databank screen. */
-function getBom() {
-  var bom = readBom();
-  var map = {};
-  bom.forEach(function (r) {
-    if (!map[r.processNo]) {
-      map[r.processNo] = { processNo:r.processNo, model:r.model, partName:r.partName, subParts:[] };
-    }
-    map[r.processNo].subParts.push({
-      subPartCode:r.subPartCode, qtyPerUnit:r.qtyPerUnit, location:r.location
-    });
-  });
-  var out = Object.keys(map).sort().map(function (k) { return map[k]; });
-  return { success:true, processes: out, totalRows: bom.length };
-}
-
-/** p.processNo, p.model, p.partName, p.subParts[], p.originalCode */
-function saveProcess(p) {
-  var code = String(p.processNo || '').trim();
-  if (!code) throw new Error('Process No. is required');
-  var subs = p.subParts || [];
-  if (!subs.length) throw new Error('At least one sub part is required');
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_BOM);
-    var data = sh.getDataRange().getValues();
-    var original = String(p.originalCode || '').trim();
-
-    // Remove the rows this process currently occupies (bottom-up so indexes hold).
-    var target = original || code;
-    for (var i = data.length - 1; i >= 1; i--) {
-      if (String(data[i][1] || '').trim() === target) sh.deleteRow(i + 1);
-    }
-
-    // Guard against creating a duplicate when adding (not renaming).
-    if (!original) {
-      var after = sh.getDataRange().getValues();
-      for (var j = 1; j < after.length; j++) {
-        if (String(after[j][1] || '').trim() === code) {
-          throw new Error('That Process No. already exists');
-        }
-      }
-    }
-
-    var rows = subs.filter(function (s) { return String(s.subPartCode || '').trim(); })
-      .map(function (s) {
-        return [ p.model || '', code, p.partName || '',
-                 String(s.subPartCode).trim(), Number(s.qtyPerUnit) || 1, s.location || '' ];
-      });
-    if (!rows.length) throw new Error('At least one sub part is required');
-
-    sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
-    return { success:true, rows: rows.length };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function deleteProcess(p) {
-  var code = String(p.processNo || '').trim();
-  if (!code) throw new Error('Missing Process No.');
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_BOM);
-    var data = sh.getDataRange().getValues();
-    var removed = 0;
-    for (var i = data.length - 1; i >= 1; i--) {
-      if (String(data[i][1] || '').trim() === code) { sh.deleteRow(i + 1); removed++; }
-    }
-    return { success:true, removed: removed };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-/* ========================================================== Picklist */
-
-function readPicklist() {
-  var data = sheet(SHEET_PICKLIST).getDataRange().getValues();
-  var rows = [];
-  for (var i = 1; i < data.length; i++) {
-    if (!data[i][0]) continue;
-    var o = { _row: i + 1 };
-    PICK_H.forEach(function (h, idx) {
-      var v = data[i][idx];
-      if (v instanceof Date) v = v.toISOString();
-      o[h] = v;
-    });
-    o.Picked = truthy(o.Picked);
-    o.Date = ymd(o.Date);
-    rows.push(o);
-  }
-  return rows;
-}
-
-function getRobots() {
-  var rows = readPicklist().sort(function (a,b) {
-    return new Date(b.CreatedTimestamp) - new Date(a.CreatedTimestamp);
-  });
-  var seen = {}, out = [];
-  rows.forEach(function (r) {
-    var robot = String(r.Robot || '').trim();
-    if (robot && !seen[robot]) { seen[robot] = true; out.push(robot); }
-  });
-  return { success:true, robots: out };
-}
-
-function getRecentProcesses(p) {
-  var robot = String(p.robot || '').trim();
-  if (!robot) return { success:true, processes:[], firstTime:true };
-
-  var rows = readPicklist()
-    .filter(function (r) { return String(r.Robot || '').trim() === robot; })
-    .sort(function (a,b) { return new Date(b.CreatedTimestamp) - new Date(a.CreatedTimestamp); });
-  if (!rows.length) return { success:true, processes:[], firstTime:true };
-
-  var batches = [], seenB = {};
-  rows.forEach(function (r) { if (!seenB[r.BatchID]) { seenB[r.BatchID] = true; batches.push(r.BatchID); } });
-  var keep = {};
-  batches.slice(0, LOOKBACK).forEach(function (b) { keep[b] = true; });
-
-  var seen = {}, out = [];
-  rows.forEach(function (r) {
-    if (!keep[r.BatchID] || seen[r.ProcessNo]) return;
-    seen[r.ProcessNo] = true;
-    out.push({ code:r.ProcessNo, model:r.Model, partName:r.PartName, lastUsed: r.Date });
-  });
-  return { success:true, processes: out, firstTime:false };
-}
-
-/* ------------------------------------------------------ create batch */
-
-/** p.items - [{robot, processNo, qty}] */
-function previewPicklist(p) {
-  var items = p.items || [];
-  if (!items.length) throw new Error('No items provided');
-
-  var bom = readBom();
-  var preview = [], notFound = [];
-
-  items.forEach(function (item) {
-    var processNo = String(item.processNo || '').trim();
-    var qty = Number(item.qty) || 0;
-    var subs = bom.filter(function (r) { return r.processNo === processNo; });
-    if (!subs.length) { notFound.push(processNo); return; }
-
-    subs.forEach(function (s) {
-      preview.push({
-        robot: String(item.robot || '').trim(),
-        processNo: processNo, model: s.model, partName: s.partName,
-        qtyProcess: qty, subPartCode: s.subPartCode, qtyPerUnit: s.qtyPerUnit,
-        requiredQty: qty * s.qtyPerUnit, location: s.location
-      });
-    });
-  });
-
-  return { success:true, preview: preview, notFound: notFound };
-}
-
-function findOpenDuplicates(date, keys) {
-  var rows = readPicklist();
-  var found = {};
-  rows.forEach(function (r) {
-    if (r.Date !== date) return;
-    if (r.Status === 'Collected' || r.Status === 'Cancelled') return;
-    if (r.DecisionStatus === 'Dropped') return;
-    var k = String(r.Robot).trim() + '||' + String(r.ProcessNo).trim();
-    if (keys.indexOf(k) !== -1) found[k.replace('||', ' / ')] = true;
-  });
-  return Object.keys(found);
-}
-
-/** p.date, p.createdBy, p.rows, p.force */
-function submitPicklist(p) {
-  var date = p.date, createdBy = p.createdBy || '', rows = p.rows || [];
-  if (!date) throw new Error('Missing date');
-  if (!rows.length) throw new Error('No rows to submit');
-
-  var keys = [];
-  rows.forEach(function (r) {
-    var k = String(r.robot || '').trim() + '||' + String(r.processNo || '').trim();
-    if (keys.indexOf(k) === -1) keys.push(k);
-  });
-
-  if (!p.force) {
-    var dupes = findOpenDuplicates(date, keys);
-    if (dupes.length) {
-      return { success:false, duplicate:true, duplicates:dupes,
-               error:'Already sent today, not yet collected: ' + dupes.join(', ') };
-    }
-  }
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_PICKLIST);
-    // The suffix matters: a timestamp only precise to the second would collide
-    // if two picklists are submitted in the same second (two pickers at once,
-    // or one submitting twice quickly), and colliding BatchIDs merge separate
-    // submissions into a single rack.
-    var batchId = 'PL-' + Utilities.formatDate(new Date(), tz(), 'yyyyMMdd-HHmmss') +
-                  '-' + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
-    var now = new Date();
-
-    var out = rows.map(function (r) {
-      var req = Number(r.requiredQty) || 0;
-      return [
-        Utilities.getUuid(), batchId, date, r.robot || '', r.model || '',
-        r.processNo || '', r.partName || '',
-        r.qtyProcess || '', r.qtyProcess || '',
-        r.subPartCode || '', Number(r.qtyPerUnit) || 1,
-        req, req, '', r.location || '', false, '',
-        '', '', '', '',
-        'Pending', createdBy, now, '', '', '', ''
-      ];
-    });
-
-    sh.getRange(sh.getLastRow() + 1, 1, out.length, PICK_H.length).setValues(out);
-    return { success:true, batchId: batchId, rowsCreated: out.length };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-/* ------------------------------------------------------------- racks */
-
+function fullName(model, partName) { return [model, partName].filter(Boolean).join(' '); }
+function isPicked(r) { return r.Picked === true || r.Picked === 'TRUE'; }
 function isShort(r) {
   return r.IssuedQty !== '' && r.IssuedQty !== null && r.IssuedQty !== undefined &&
          Number(r.IssuedQty) < Number(r.RequiredQty);
 }
-/** Qty the picker edited by hand — not a clean multiple of the Process qty. */
 function isCustomQty(r) {
-  var expected = Number(r.QtyProcess) * (Number(r.QtyPerUnit) || 1);
+  const expected = Number(r.QtyProcess) * (Number(r.QtyPerUnit) || 1);
   return Number(r.RequiredQty) !== expected;
 }
-
-/** A rack is ONE ROBOT for ONE DAY. Date is part of the key so that even a
- *  repeated BatchID can never merge two different days into one rack. */
-function getRacks(p) {
-  var date = p.date;
-  var all = readPicklist().filter(function (r) { return r.Date === date; });
-  var map = {};
-
-  all.forEach(function (r) {
-    var key = r.Date + '||' + r.BatchID + '||' + r.Robot;
-    if (!map[key]) map[key] = { batchId:r.BatchID, robot:r.Robot, date:r.Date, allRows:[] };
-    map[key].allRows.push(r);
-  });
-
-  var racks = Object.keys(map).map(function (k) { return decorateRack(map[k]); });
-  racks.sort(function (a,b) { return a.robot.localeCompare(b.robot, undefined, { numeric:true }); });
-  return { success:true, racks: racks };
+function locSort(a, b) {
+  if (!a && !b) return 0; if (!a) return 1; if (!b) return -1;
+  return a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' });
+}
+function groupByLocation(rows) {
+  const map = {};
+  rows.forEach(r => { const loc = (r.Location||'').toString().trim(); (map[loc]=map[loc]||[]).push(r); });
+  return Object.keys(map).sort(locSort).map(loc => ({ loc, rows:map[loc] }));
 }
 
-function decorateRack(rack) {
-  var rows = rack.allRows;
-  var live = rows.filter(function (r) {
-    return r.DecisionStatus !== 'Dropped' && r.Status !== 'Cancelled';
+// POST as text/plain: no CORS preflight (Apps Script can't answer one), and
+// no URL length limit (GET broke on big picklists).
+async function api(action, params = {}) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, params))
+  });
+  const data = await res.json();
+  if (!data.success && !data.duplicate) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+/* ---------------- role ---------------- */
+
+const ROLE_TABS = {
+  picker: ['create','collect','history'],
+  store:  ['store','history'],
+  both:   ['create','store','collect','history']
+};
+const ROLE_LABEL = { picker:'Picker', store:'Store', both:'Supervisor' };
+let ROLE = null;
+try { ROLE = localStorage.getItem('wip_role'); } catch (e) {}
+
+function applyRole(role) {
+  ROLE = role;
+  try { localStorage.setItem('wip_role', role); } catch (e) {}
+  document.getElementById('role-label').textContent = ROLE_LABEL[role] || role;
+  const allowed = ROLE_TABS[role] || ROLE_TABS.both;
+  let first = null;
+  document.querySelectorAll('#main-nav .tab-btn').forEach(btn => {
+    const ok = allowed.includes(btn.dataset.tab);
+    btn.style.display = ok ? '' : 'none';
+    if (ok && !first) first = btn;
+  });
+  document.getElementById('role-back').classList.remove('open');
+  if (first) first.click();
+  refreshBadges();
+}
+document.querySelectorAll('#role-back [data-role]').forEach(b =>
+  b.addEventListener('click', () => applyRole(b.dataset.role)));
+document.getElementById('btn-change-role').addEventListener('click', () =>
+  document.getElementById('role-back').classList.add('open'));
+
+/* ---------------- databank PIN ---------------- */
+// Asked every time — walking away shouldn't leave the databank open.
+
+document.getElementById('btn-databank').addEventListener('click', () => {
+  document.getElementById('pin-input').value = '';
+  document.getElementById('pin-back').classList.add('open');
+  setTimeout(() => document.getElementById('pin-input').focus(), 50);
+});
+document.getElementById('btn-pin-cancel').addEventListener('click', () =>
+  document.getElementById('pin-back').classList.remove('open'));
+document.getElementById('btn-pin-ok').addEventListener('click', tryPin);
+document.getElementById('pin-input').addEventListener('keydown', e => { if (e.key === 'Enter') tryPin(); });
+
+function tryPin() {
+  const el = document.getElementById('pin-input');
+  if (el.value === DATABANK_PIN) {
+    el.value = '';
+    document.getElementById('pin-back').classList.remove('open');
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('tab-databank').style.display = 'block';
+    loadDatabank();
+  } else {
+    el.value = '';
+    showToast('Wrong PIN', true);
+  }
+}
+
+/* ---------------- tabs ---------------- */
+
+document.querySelectorAll('#main-nav .tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).style.display = 'block';
+    if (btn.dataset.tab === 'store') loadStore();
+    if (btn.dataset.tab === 'collect') loadCollect();
+    if (btn.dataset.tab === 'history') loadHistory();
+  });
+});
+['create-date','store-date','collect-date'].forEach(id => document.getElementById(id).value = todayStr());
+rememberName('create-name','wip_picker');
+rememberName('store-name','wip_store');
+rememberName('collect-name','wip_picker');
+
+/* ---------------- badges ---------------- */
+
+async function refreshBadges() {
+  try {
+    const date = todayStr();
+    const data = await api('getRacks', { date });
+    const pending = data.racks.filter(r => r.status === 'Pending').length;
+    const ready = data.racks.filter(r => r.status === 'Ready').length;
+    setBadge('store', pending);
+    setBadge('collect', ready);
+  } catch (e) { /* badge is cosmetic - never block the app on it */ }
+}
+function setBadge(tab, n) {
+  const btn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+  if (!btn) return;
+  const base = btn.dataset.label || btn.textContent.trim().split(' ')[0];
+  btn.dataset.label = base;
+  btn.innerHTML = esc(base) + (n > 0 ? ` <span class="dot">${n}</span>` : '');
+}
+
+/* ================= CREATE ================= */
+
+let shownProcs = [];
+let queued = [];
+let preview = [];
+
+async function loadRobots() {
+  try {
+    const data = await api('getRobots');
+    document.getElementById('robot-list').innerHTML =
+      data.robots.map(r => `<option value="${esc(r)}">`).join('');
+  } catch (err) { showToast('Could not load robots: ' + err.message, true); }
+}
+
+let robotDebounce;
+document.getElementById('robot-input').addEventListener('input', () => {
+  clearTimeout(robotDebounce);
+  robotDebounce = setTimeout(loadRobotProcs, 400);
+});
+document.getElementById('robot-input').addEventListener('change', loadRobotProcs);
+
+async function loadRobotProcs() {
+  const robot = document.getElementById('robot-input').value.trim();
+  const card = document.getElementById('robot-parts-card');
+  if (!robot) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  const banner = document.getElementById('robot-banner');
+  const list = document.getElementById('robot-parts-list');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getRecentProcesses', { robot });
+    if (data.firstTime || !data.processes.length) {
+      banner.innerHTML = `<div class="info-banner">First time using <strong>${esc(robot)}</strong>.
+        Search and add its Process No. below — next time they come up automatically.</div>`;
+      shownProcs = [];
+    } else {
+      banner.innerHTML = '';
+      shownProcs = data.processes.map(p => ({ code:p.code, model:p.model, partName:p.partName, lastUsed:p.lastUsed }));
+    }
+    renderRobotProcs();
+  } catch (err) {
+    list.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+function renderRobotProcs() {
+  const list = document.getElementById('robot-parts-list');
+  if (!shownProcs.length) { list.innerHTML = '<div class="empty-state">No Process No. yet — search and add below.</div>'; return; }
+  list.innerHTML = shownProcs.map((p,i) => `
+    <div class="part-row">
+      <div class="info">
+        <div class="code">${esc(p.code)}${p.isNew ? '<span class="badge badge-revised">new</span>' : ''}</div>
+        <div class="meta">${esc(fullName(p.model, p.partName))}${p.lastUsed ? ' &middot; last used ' + esc(p.lastUsed) : ''}</div>
+      </div>
+      <input type="number" class="qty-input proc-qty" min="1" placeholder="Qty"
+             data-code="${esc(p.code)}" data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
+      <button class="rm-btn" data-rm="${i}" title="Remove">&times;</button>
+    </div>`).join('');
+  list.querySelectorAll('[data-rm]').forEach(b =>
+    b.addEventListener('click', () => { shownProcs.splice(Number(b.dataset.rm),1); renderRobotProcs(); }));
+}
+
+document.getElementById('btn-parent-apply-all').addEventListener('click', () => {
+  const el = document.getElementById('parent-all-qty');
+  const v = Number(el.value);
+  if (el.value === '' || !(v > 0)) { showToast('Enter a qty first', true); return; }
+  const inputs = document.querySelectorAll('.proc-qty');
+  if (!inputs.length) { showToast('Nothing listed yet', true); return; }
+  inputs.forEach(inp => inp.value = v);
+  showToast('All ' + inputs.length + ' Process No. set to ' + v);
+});
+
+let searchDebounce;
+document.getElementById('proc-search').addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(runProcSearch, 300);
+});
+document.getElementById('proc-search').addEventListener('focus', runProcSearch);
+
+async function runProcSearch() {
+  const q = document.getElementById('proc-search').value.trim();
+  const box = document.getElementById('proc-results');
+  if (!q) { box.className = 'search-results'; box.innerHTML = ''; return; }
+  try {
+    const data = await api('searchProcesses', { q });
+    box.className = 'search-results open';
+    if (!data.processes.length) { box.innerHTML = '<div class="search-empty">Nothing matches that.</div>'; return; }
+    box.innerHTML = data.processes.map(p => {
+      const already = shownProcs.some(s => s.code === p.code);
+      return `<div class="search-item${already ? ' added' : ''}" data-add="${esc(p.code)}"
+                data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
+        <div class="sc">${esc(p.code)}${already ? ' &check; added' : ''}</div>
+        <div class="sn">${esc(fullName(p.model, p.partName))} &middot; ${p.subCount} sub part${p.subCount===1?'':'s'}</div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-add]').forEach(it => {
+      it.addEventListener('click', () => {
+        const code = it.dataset.add;
+        if (shownProcs.some(p => p.code === code)) { showToast('Already in the list', true); return; }
+        shownProcs.push({ code, model:it.dataset.model, partName:it.dataset.name, isNew:true });
+        document.getElementById('proc-search').value = '';
+        box.className = 'search-results'; box.innerHTML = '';
+        renderRobotProcs();
+        showToast(code + ' added');
+      });
+    });
+  } catch (err) { showToast('Search failed: ' + err.message, true); }
+}
+
+document.getElementById('btn-add-queue').addEventListener('click', () => {
+  const robot = document.getElementById('robot-input').value.trim();
+  if (!robot) { showToast('Enter a robot first', true); return; }
+  let added = 0;
+  document.querySelectorAll('.proc-qty').forEach(inp => {
+    const qty = Number(inp.value);
+    if (qty > 0) {
+      const code = inp.dataset.code;
+      const f = queued.find(q => q.robot === robot && q.processNo === code);
+      if (f) f.qty = qty;
+      else queued.push({ robot, processNo:code, model:inp.dataset.model, partName:inp.dataset.name, qty });
+      added++;
+    }
+  });
+  if (!added) { showToast('Fill in at least one qty first', true); return; }
+  renderQueue();
+  document.getElementById('robot-input').value = '';
+  document.getElementById('parent-all-qty').value = '';
+  document.getElementById('robot-parts-card').style.display = 'none';
+  shownProcs = [];
+  showToast(added + ' Process No. added for ' + robot);
+});
+
+function renderQueue() {
+  const wrap = document.getElementById('queue-wrap');
+  const el = document.getElementById('queue-list');
+  if (!queued.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  const byRobot = {};
+  queued.forEach((q,i) => (byRobot[q.robot] = byRobot[q.robot] || []).push({ ...q, _i:i }));
+  el.innerHTML = Object.keys(byRobot).sort().map(robot => `
+    <div class="group-header">${esc(robot)}</div>
+    ${byRobot[robot].map(q => `
+      <div class="part-row">
+        <div class="info">
+          <div class="code">${esc(q.processNo)}</div>
+          <div class="meta">${esc(fullName(q.model, q.partName))} &middot; qty ${esc(q.qty)}</div>
+        </div>
+        <button class="rm-btn" data-q="${q._i}">&times;</button>
+      </div>`).join('')}`).join('');
+  el.querySelectorAll('[data-q]').forEach(b =>
+    b.addEventListener('click', () => { queued.splice(Number(b.dataset.q),1); renderQueue(); }));
+}
+
+document.getElementById('btn-preview').addEventListener('click', async () => {
+  const date = document.getElementById('create-date').value;
+  const name = document.getElementById('create-name').value.trim();
+  if (!date || !name) { showToast('Fill in date and your name', true); return; }
+  if (!queued.length) { showToast('Add at least one Process No. first', true); return; }
+
+  const btn = document.getElementById('btn-preview');
+  btn.disabled = true; btn.textContent = 'Loading...';
+  try {
+    const data = await api('previewPicklist', {
+      items: queued.map(q => ({ robot:q.robot, processNo:q.processNo, qty:q.qty }))
+    });
+    if (data.notFound && data.notFound.length) showToast('No BOM entry for: ' + data.notFound.join(', '), true);
+    preview = data.preview;
+    if (!preview.length) return;
+    renderPreview();
+    const card = document.getElementById('preview-card');
+    card.style.display = 'block';
+    card.scrollIntoView({ behavior:'smooth' });
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Preview Picklist';
+  }
+});
+
+document.getElementById('btn-apply-all').addEventListener('click', () => {
+  const el = document.getElementById('apply-all-qty');
+  const v = Number(el.value);
+  if (el.value === '' || !(v >= 0)) { showToast('Enter a qty first', true); return; }
+  preview.forEach(p => p.requiredQty = v);
+  renderPreview();
+  showToast('All ' + preview.length + ' sub part lines set to ' + v);
+});
+
+function previewIsCustom(it) {
+  return Number(it.requiredQty) !== Number(it.qtyProcess) * (Number(it.qtyPerUnit) || 1);
+}
+
+function renderPreview() {
+  const el = document.getElementById('preview-list');
+  if (!preview.length) { el.innerHTML = '<div class="empty-state">Nothing to show.</div>'; return; }
+
+  const customCount = preview.filter(previewIsCustom).length;
+  const warn = document.getElementById('custom-warn');
+  if (customCount) {
+    warn.style.display = 'block';
+    warn.innerHTML = `<strong>${customCount} line(s) have a custom qty</strong> — they don't match
+      the Process No. qty &times; per-unit. Store will see these highlighted so they can double check.`;
+  } else warn.style.display = 'none';
+
+  const groups = {};
+  preview.forEach((it,i) => {
+    const key = it.robot + '||' + it.processNo + '||' + it.qtyProcess + '||' + fullName(it.model, it.partName);
+    (groups[key] = groups[key] || []).push({ ...it, _i:i });
   });
 
-  rack.parts = live;
-  rack.status = live.length ? live[0].Status : 'Cancelled';
-  rack.createdBy = rows[0].CreatedBy;
-  rack.createdAt = rows[0].CreatedTimestamp;
-  rack.readyBy = rows[0].ReadyBy;
-  rack.readyAt = rows[0].ReadyTimestamp;
-  rack.collectedBy = rows[0].CollectedBy;
-  rack.collectedAt = rows[0].CollectedTimestamp;
+  el.innerHTML = Object.keys(groups).map(key => {
+    const [robot, proc, qty, fn] = key.split('||');
+    return `
+    <div class="group-header">${esc(robot)} &mdash; ${esc(proc)} ${fn ? '(' + esc(fn) + ')' : ''} &middot; ${esc(qty)} unit</div>
+    ${groups[key].map(it => `
+      <div class="part-row${previewIsCustom(it) ? ' custom' : ''}"
+           style="${previewIsCustom(it) ? 'border-color:#f0d089;background:#fffdf5;' : ''}">
+        <div class="info">
+          <div class="code">${esc(it.subPartCode)}${previewIsCustom(it) ? '<span class="badge badge-custom">custom qty</span>' : ''}</div>
+          <div class="meta">${it.location ? esc(it.location) : 'No location set'}${it.qtyPerUnit > 1 ? ' &middot; x' + it.qtyPerUnit + ' per unit' : ''}</div>
+        </div>
+        <input type="number" class="qty-input pv-qty" min="0" value="${esc(it.requiredQty)}" data-i="${it._i}">
+        <button class="rm-btn" data-pv="${it._i}">&times;</button>
+      </div>`).join('')}`;
+  }).join('');
 
-  rack.needsDecision = rows.some(function (r) { return r.DecisionStatus === 'Awaiting'; });
-  rack.wasRevised = rows.some(function (r) {
-    return r.DecisionStatus === 'Accepted' || r.DecisionStatus === 'Dropped';
+  el.querySelectorAll('.pv-qty').forEach(inp => {
+    inp.addEventListener('input', () => { preview[Number(inp.dataset.i)].requiredQty = Number(inp.value) || 0; });
+    inp.addEventListener('change', renderPreview);
   });
+  el.querySelectorAll('[data-pv]').forEach(b =>
+    b.addEventListener('click', () => { preview.splice(Number(b.dataset.pv),1); renderPreview(); }));
+}
 
-  var procMap = {};
-  rows.forEach(function (r) {
+document.getElementById('btn-back').addEventListener('click', () =>
+  document.getElementById('preview-card').style.display = 'none');
+
+document.getElementById('btn-submit').addEventListener('click', () => doSubmit(false));
+
+async function doSubmit(force) {
+  const date = document.getElementById('create-date').value;
+  const name = document.getElementById('create-name').value.trim();
+  if (!preview.length) { showToast('Nothing to submit', true); return; }
+
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true; btn.textContent = 'Sending...';
+  try {
+    const data = await api('submitPicklist', { date, createdBy:name, rows:preview, force });
+    if (data.duplicate) {
+      btn.disabled = false; btn.textContent = 'Confirm & Send to Store';
+      if (confirm('Already sent today and not yet collected:\n\n' + data.duplicates.join('\n') + '\n\nSend anyway?')) {
+        await doSubmit(true);
+      }
+      return;
+    }
+    showToast('Sent to store: ' + data.rowsCreated + ' sub part lines');
+    document.getElementById('preview-card').style.display = 'none';
+    queued = []; preview = [];
+    renderQueue();
+    loadRobots();
+    refreshBadges();
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirm & Send to Store';
+  }
+}
+
+/* ================= RACK RENDERING ================= */
+
+const collapsed = new Set();
+const rackView = {};
+let storeCache = [];
+let collectCache = [];
+
+function rackKey(r) { return r.batchId + '||' + r.robot; }
+
+/**
+ * The server sends rack.parts and rack.processes[].rows as separate copies
+ * (object identity doesn't survive JSON), so a tick applied via one wouldn't
+ * show in the other. Rebuild processes from parts using the SAME references,
+ * and derive every count fresh at render time — that's what makes an
+ * optimistic tick appear everywhere at once.
+ */
+function relink(rack) {
+  const procMap = {};
+  rack.parts.forEach(r => {
     if (!procMap[r.ProcessNo]) {
+      const src = (rack.processes || []).find(p => p.processNo === r.ProcessNo) || {};
       procMap[r.ProcessNo] = {
-        processNo:r.ProcessNo, model:r.Model, partName:r.PartName,
-        qtyProcess:r.QtyProcess, originalQtyProcess:r.OriginalQtyProcess,
-        decisionStatus:r.DecisionStatus, decisionType:r.DecisionType,
-        decisionBy:r.DecisionBy, decisionAt:r.DecisionAt, rows:[]
+        processNo: r.ProcessNo, model: r.Model, partName: r.PartName,
+        qtyProcess: r.QtyProcess, originalQtyProcess: r.OriginalQtyProcess,
+        decisionStatus: r.DecisionStatus, decisionType: r.DecisionType,
+        decisionBy: r.DecisionBy, decisionAt: r.DecisionAt,
+        shortRows: src.shortRows || [], rows: []
       };
     }
     procMap[r.ProcessNo].rows.push(r);
   });
-
-  rack.processes = Object.keys(procMap).sort().map(function (k) { return procMap[k]; });
-  rack.processes.forEach(function (pr) {
-    pr.live = pr.rows.filter(function (r) {
-      return r.DecisionStatus !== 'Dropped' && r.Status !== 'Cancelled';
-    });
-    pr.shortRows = pr.rows.filter(isShort);
-  });
+  rack.liveProcesses = Object.keys(procMap).sort().map(k => procMap[k]);
   return rack;
 }
 
-/** How many units of a Process No. can actually be built with what store has. */
-function buildableUnits(pr) {
-  var min = Infinity;
-  pr.rows.forEach(function (r) {
-    if (!isShort(r)) return;
-    var per = Number(r.QtyPerUnit) || 1;
-    min = Math.min(min, Math.floor(Number(r.IssuedQty) / per));
+function subLine(r, mode, showProc) {
+  const short = isShort(r);
+  const custom = isCustomQty(r);
+  const picked = isPicked(r);
+  const cls = ['sub-line'];
+  if (picked) cls.push('picked');
+  if (custom) cls.push('custom');
+
+  return `
+  <div class="${cls.join(' ')}" data-pick="${esc(r.RowID)}">
+    <span class="sub-arrow">&#8627;</span>
+    <div class="pick-box">${picked ? '&#10003;' : ''}</div>
+    <div class="info">
+      <div class="sub-code">${esc(r.SubPartCode)}${short ? '<span class="badge badge-short">short</span>' : ''}${custom ? '<span class="badge badge-custom">custom</span>' : ''}</div>
+      <div class="sub-meta">${showProc ? '<strong>' + esc(r.ProcessNo) + '</strong> &middot; ' : ''}${r.Location ? esc(r.Location) : 'No location'}${Number(r.QtyPerUnit) > 1 ? ' &middot; x' + esc(r.QtyPerUnit) : ''}</div>
+      ${r.IssuedQty !== '' && r.IssuedQty !== null ? `<div class="sub-meta">Issued <strong>${esc(r.IssuedQty)}</strong> of ${esc(r.RequiredQty)}</div>` : ''}
+      ${r.ShortageRemark ? `<div class="short-note">${esc(r.ShortageRemark)}</div>` : ''}
+    </div>
+    <div class="sub-qty">${esc(r.RequiredQty)}</div>
+  </div>
+  ${mode === 'store' ? `
+  <div class="revise-box">
+    <button class="link-btn" data-toggle="${esc(r.RowID)}">Not enough stock?</button>
+    <div class="revise-inner" id="rev-${esc(r.RowID)}">
+      <div class="row">
+        <input type="number" min="0" class="qty-input" style="width:110px;" id="qty-${esc(r.RowID)}" placeholder="Have" value="${esc(r.IssuedQty)}">
+        <input type="text" id="rmk-${esc(r.RowID)}" placeholder="Note for the picker" value="${esc(r.ShortageRemark)}">
+      </div>
+      <button class="btn btn-secondary btn-small" style="margin-top:8px;" data-flag="${esc(r.RowID)}">Flag shortage</button>
+    </div>
+  </div>` : ''}`;
+}
+
+function processTree(rack, mode) {
+  return rack.liveProcesses.map(pr => {
+    const key = rackKey(rack) + '||' + pr.processNo;
+    const isOpen = !collapsed.has(key);
+    const total = pr.rows.length, done = pr.rows.filter(isPicked).length;
+    const allDone = total > 0 && done === total, someDone = done > 0 && done < total;
+    const fn = fullName(pr.model, pr.partName);
+    const changed = pr.decisionStatus === 'Accepted' && pr.originalQtyProcess !== pr.qtyProcess;
+    return `
+    <div class="proc-block">
+      <div class="proc-head" data-proc="${esc(key)}">
+        <span class="proc-chev">${isOpen ? '&#9662;' : '&#9656;'}</span>
+        <div class="pick-box ${allDone ? 'on' : (someDone ? 'partial' : '')}"
+             data-procpick="${esc(rack.batchId)}||${esc(rack.robot)}||${esc(pr.processNo)}">${allDone ? '&#10003;' : (someDone ? '&#8211;' : '')}</div>
+        <div style="flex:1; min-width:0;">
+          <div><span class="proc-code">${esc(pr.processNo)}</span>${fn ? `<span class="proc-name">${esc(fn)}</span>` : ''}${pr.decisionStatus === 'Accepted' ? '<span class="badge badge-revised">revised</span>' : ''}</div>
+          <div class="proc-meta">${esc(pr.qtyProcess)} unit${changed ? ` (was ${esc(pr.originalQtyProcess)})` : ''} &middot; ${total} sub parts &middot; <strong>${done}/${total}</strong> picked</div>
+        </div>
+      </div>
+      <div class="proc-body${isOpen ? '' : ' hidden'}">${pr.rows.map(r => subLine(r, mode, false)).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+function locationList(rack, mode) {
+  return groupByLocation(rack.parts).map(g => `
+    <div class="loc-header"><span>${esc(g.loc || 'No location set')}</span><span class="line"></span><span>${g.rows.length}</span></div>
+    ${g.rows.map(r => subLine(r, mode, true)).join('')}`).join('');
+}
+
+function decisionPanel(rack, pr) {
+  const shorts = pr.rows.filter(isShort);
+  let buildable = Infinity;
+  shorts.forEach(r => {
+    const per = Number(r.QtyPerUnit) || 1;
+    buildable = Math.min(buildable, Math.floor(Number(r.IssuedQty) / per));
   });
-  return min === Infinity ? Number(pr.qtyProcess) : Math.max(0, min);
+  if (buildable === Infinity) buildable = Number(pr.qtyProcess);
+  buildable = Math.max(0, buildable);
+
+  const lines = shorts.map(r =>
+    `${esc(r.SubPartCode)}: asked ${esc(r.RequiredQty)}, store has ${esc(r.IssuedQty)}${r.ShortageRemark ? ' — ' + esc(r.ShortageRemark) : ''}`
+  ).join('<br>');
+
+  return `
+  <div class="decision-panel">
+    <h4>${esc(pr.processNo)} ${esc(fullName(pr.model, pr.partName))} — short on stock</h4>
+    <div class="why">${lines}<br><br>
+      Asked for <strong>${esc(pr.qtyProcess)} unit</strong>.
+      With what store has, only <strong>${buildable} unit</strong> can be completed.</div>
+    <div class="decision-actions">
+      <button class="btn btn-primary" data-dec="partial" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" data-proc="${esc(pr.processNo)}">Run ${buildable} unit</button>
+      <button class="btn btn-secondary" data-dec="drop" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" data-proc="${esc(pr.processNo)}">Drop this Process No.</button>
+      <button class="btn btn-danger" data-dec="cancel" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" data-proc="${esc(pr.processNo)}">Cancel whole robot</button>
+    </div>
+  </div>`;
 }
 
-/* ------------------------------------------------------ tick actions */
+function rackCard(rack, mode) {
+  const key = rackKey(rack);
+  // Location view exists so store can walk the floor area by area. The picker
+  // is just taking a finished rack, so Collect always uses the tree.
+  const view = mode === 'store' ? (rackView[key] || 'process') : 'process';
+  const total = rack.parts.length;
+  const done = rack.parts.filter(isPicked).length;
+  const shortCount = rack.parts.filter(isShort).length;
+  const customCount = rack.parts.filter(isCustomQty).length;
+  const allPicked = total > 0 && done === total;
 
-function colOf(name) { return PICK_H.indexOf(name) + 1; }
+  let action;
+  if (mode === 'store') {
+    action = `<button class="btn btn-ready btn-small" data-ready="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" ${allPicked ? '' : 'disabled'}>Rack Ready</button>`;
+  } else {
+    action = rack.needsDecision
+      ? `<button class="btn btn-collect btn-small" disabled>Waiting on decision</button>`
+      : `<button class="btn btn-collect btn-small" data-collect="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}">Collect Rack</button>`;
+  }
 
-/** p.rowId, p.picked */
-function setPicked(p) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(15000);
-  try {
-    var sh = sheet(SHEET_PICKLIST);
-    var ids = sh.getRange(1, colOf('RowID'), sh.getLastRow(), 1).getValues();
-    for (var i = 1; i < ids.length; i++) {
-      if (String(ids[i][0]) === String(p.rowId)) {
-        sh.getRange(i + 1, colOf('Picked')).setValue(truthy(p.picked));
-        return { success:true };
-      }
-    }
-    throw new Error('Row not found');
-  } finally { lock.releaseLock(); }
+  const decisions = (mode === 'collect' && rack.needsDecision)
+    ? rack.liveProcesses.filter(pr => pr.decisionStatus === 'Awaiting').map(pr => decisionPanel(rack, pr)).join('')
+    : '';
+
+  const droppedNote = rack.liveProcesses.length < (rack.processes || []).length
+    ? `<div class="hint">Some Process No. were dropped from this rack.</div>` : '';
+
+  return `
+  <div class="rack" data-rackkey="${esc(key)}">
+    <div class="rack-head">
+      <div>
+        <div class="title">${esc(rack.robot)}
+          <span class="badge badge-${String(rack.status).toLowerCase()}">${esc(rack.status)}</span>
+          ${rack.needsDecision ? '<span class="badge badge-short">needs decision</span>' : ''}
+          ${rack.wasRevised && !rack.needsDecision ? '<span class="badge badge-revised">revised</span>' : ''}
+          ${shortCount ? `<span class="badge badge-short">${shortCount} short</span>` : ''}
+          ${customCount ? `<span class="badge badge-custom">${customCount} custom qty</span>` : ''}
+        </div>
+        <div class="sub">${esc(rack.liveProcesses.map(p => p.processNo).join(', '))} &middot; ${total} sub parts</div>
+        <div class="progress${allPicked ? ' done' : ''}"><strong>${done}/${total}</strong> ${allPicked ? 'all ticked' : 'ticked'}${!allPicked && mode === 'store' ? ' — tick everything to enable Rack Ready' : ''}</div>
+        ${droppedNote}
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        ${mode === 'store' ? `
+        <div class="view-toggle">
+          <button class="${view==='process'?'on':''}" data-view="process" data-rk="${esc(key)}">By Process No.</button>
+          <button class="${view==='location'?'on':''}" data-view="location" data-rk="${esc(key)}">By Location</button>
+        </div>` : ''}
+        ${action}
+      </div>
+    </div>
+    <div class="rack-body">
+      ${decisions}
+      ${view === 'process' ? processTree(rack, mode) : locationList(rack, mode)}
+    </div>
+  </div>`;
 }
 
-/** p.batchId, p.robot, p.processNo, p.picked, p.date */
-function setProcessPicked(p) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_PICKLIST);
-    var data = sh.getDataRange().getValues();
-    var bIdx = PICK_H.indexOf('BatchID'), rIdx = PICK_H.indexOf('Robot'),
-        pIdx = PICK_H.indexOf('ProcessNo'), dIdx = PICK_H.indexOf('DecisionStatus'),
-        sIdx = PICK_H.indexOf('Status'), dtIdx = PICK_H.indexOf('Date');
-    var pickedCol = colOf('Picked');
-    var val = truthy(p.picked);
-    var updated = 0;
-
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][bIdx]) !== String(p.batchId)) continue;
-      if (String(data[i][rIdx]).trim() !== String(p.robot).trim()) continue;
-      if (String(data[i][pIdx]).trim() !== String(p.processNo).trim()) continue;
-      if (p.date && ymd(data[i][dtIdx]) !== p.date) continue;
-      if (data[i][dIdx] === 'Dropped' || data[i][sIdx] === 'Cancelled') continue;
-      sh.getRange(i + 1, pickedCol).setValue(val);
-      updated++;
-    }
-    return { success:true, updated: updated };
-  } finally { lock.releaseLock(); }
-}
-
-function markRackStatus(p, newStatus) {
-  var batchId = p.batchId, robot = String(p.robot || '').trim(), by = p.by || '';
-  if (!batchId || !robot) throw new Error('Missing batchId or robot');
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_PICKLIST);
-    var data = sh.getDataRange().getValues();
-    var bIdx = PICK_H.indexOf('BatchID'), rIdx = PICK_H.indexOf('Robot'),
-        dIdx = PICK_H.indexOf('DecisionStatus'), sIdx = PICK_H.indexOf('Status'),
-        dtIdx = PICK_H.indexOf('Date');
-    var sCol = colOf('Status');
-    var byCol = colOf(newStatus === 'Ready' ? 'ReadyBy' : 'CollectedBy');
-    var tsCol = colOf(newStatus === 'Ready' ? 'ReadyTimestamp' : 'CollectedTimestamp');
-    var now = new Date(), updated = 0;
-
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][bIdx]) !== String(batchId)) continue;
-      if (String(data[i][rIdx]).trim() !== robot) continue;
-      if (p.date && ymd(data[i][dtIdx]) !== p.date) continue;
-      if (data[i][dIdx] === 'Dropped' || data[i][sIdx] === 'Cancelled') continue;
-      var rn = i + 1;
-      sh.getRange(rn, sCol).setValue(newStatus);
-      sh.getRange(rn, byCol).setValue(by);
-      sh.getRange(rn, tsCol).setValue(now);
-      updated++;
-    }
-    if (!updated) throw new Error('Rack not found');
-    return { success:true, updated: updated };
-  } finally { lock.releaseLock(); }
-}
-
-/**
- * Store records what it actually has for one sub part. That puts the whole
- * Process No. into "Awaiting" so the picker has to decide what to do.
- * p.rowId, p.issuedQty, p.remark
- */
-function flagShortage(p) {
-  if (!p.rowId) throw new Error('Missing rowId');
-  var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    var sh = sheet(SHEET_PICKLIST);
-    var data = sh.getDataRange().getValues();
-    var idIdx = PICK_H.indexOf('RowID'), bIdx = PICK_H.indexOf('BatchID'),
-        rIdx = PICK_H.indexOf('Robot'), pIdx = PICK_H.indexOf('ProcessNo'),
-        reqIdx = PICK_H.indexOf('RequiredQty'), dIdx = PICK_H.indexOf('DecisionStatus');
-
-    var target = -1;
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][idIdx]) === String(p.rowId)) { target = i; break; }
-    }
-    if (target === -1) throw new Error('Row not found');
-
-    var qty = Number(p.issuedQty);
-    if (qty >= Number(data[target][reqIdx])) {
-      return { success:false, error:'That is not short — leave it blank if you have enough' };
-    }
-
-    sh.getRange(target + 1, colOf('IssuedQty')).setValue(qty);
-    sh.getRange(target + 1, colOf('ShortageRemark')).setValue(p.remark || '');
-
-    var batchId = data[target][bIdx], robot = data[target][rIdx], proc = data[target][pIdx];
-    var decCol = colOf('DecisionStatus');
-    for (var j = 1; j < data.length; j++) {
-      if (String(data[j][bIdx]) !== String(batchId)) continue;
-      if (String(data[j][rIdx]).trim() !== String(robot).trim()) continue;
-      if (String(data[j][pIdx]).trim() !== String(proc).trim()) continue;
-      if (data[j][dIdx] === 'Dropped') continue;
-      sh.getRange(j + 1, decCol).setValue('Awaiting');
-    }
-    return { success:true };
-  } finally { lock.releaseLock(); }
+function findRow(cache, rowId) {
+  for (const rack of cache) {
+    const r = rack.parts.find(x => x.RowID === rowId);
+    if (r) return r;
+  }
+  return null;
 }
 
 /**
- * The picker decides. p.type = 'partial' | 'drop' | 'cancel'
- * p.batchId, p.robot, p.processNo, p.by
+ * Ticks update the cache and re-render immediately, then sync to the sheet in
+ * the background — that's what removes the loading flash on every tap. A
+ * failed write reverts just that row and says so.
  */
-function applyDecision(p) {
-  var type = p.type, batchId = p.batchId;
-  var robot = String(p.robot || '').trim(), proc = String(p.processNo || '').trim();
-  var by = p.by || '';
-  if (!batchId || !robot) throw new Error('Missing batchId or robot');
+function bindRack(container, mode, cache, rerender, reload) {
+  container.querySelectorAll('[data-view]').forEach(b =>
+    b.addEventListener('click', e => { e.stopPropagation(); rackView[b.dataset.rk] = b.dataset.view; rerender(); }));
 
-  var lock = LockService.getScriptLock();
-  lock.waitLock(25000);
+  container.querySelectorAll('[data-proc]').forEach(h =>
+    h.addEventListener('click', e => {
+      if (e.target.closest('[data-procpick]')) return;
+      const k = h.dataset.proc;
+      if (collapsed.has(k)) collapsed.delete(k); else collapsed.add(k);
+      rerender();
+    }));
+
+  container.querySelectorAll('[data-procpick]').forEach(box =>
+    box.addEventListener('click', e => {
+      e.stopPropagation();
+      const [batchId, robot, processNo] = box.dataset.procpick.split('||');
+      const rack = cache.find(r => r.batchId === batchId && r.robot === robot);
+      if (!rack) return;
+      const rows = rack.parts.filter(r => r.ProcessNo === processNo);
+      const nowOn = !rows.every(isPicked);
+      rows.forEach(r => { r.Picked = nowOn; });
+      rerender();
+      api('setProcessPicked', { batchId, robot, processNo, picked: nowOn, date: rack.date }).catch(err => {
+        rows.forEach(r => { r.Picked = !nowOn; });
+        rerender();
+        showToast('Could not save: ' + err.message, true);
+      });
+    }));
+
+  container.querySelectorAll('[data-pick]').forEach(row =>
+    row.addEventListener('click', () => {
+      const r = findRow(cache, row.dataset.pick);
+      if (!r) return;
+      const nowOn = !isPicked(r);
+      r.Picked = nowOn;
+      rerender();
+      api('setPicked', { rowId: r.RowID, picked: nowOn }).catch(err => {
+        r.Picked = !nowOn;
+        rerender();
+        showToast('Could not save: ' + err.message, true);
+      });
+    }));
+
+  if (mode === 'store') {
+    container.querySelectorAll('[data-toggle]').forEach(b =>
+      b.addEventListener('click', e => { e.stopPropagation(); document.getElementById('rev-' + b.dataset.toggle).classList.toggle('open'); }));
+    container.querySelectorAll('.revise-inner').forEach(box =>
+      box.addEventListener('click', e => e.stopPropagation()));
+
+    container.querySelectorAll('[data-flag]').forEach(b =>
+      b.addEventListener('click', async e => {
+        e.stopPropagation();
+        const by = document.getElementById('store-name').value.trim();
+        if (!by) { showToast('Enter your name first', true); return; }
+        const id = b.dataset.flag;
+        const qty = document.getElementById('qty-' + id).value;
+        const remark = document.getElementById('rmk-' + id).value.trim();
+        if (qty === '') { showToast('Enter how many you have', true); return; }
+        b.disabled = true; b.textContent = 'Saving...';
+        try {
+          const res = await api('flagShortage', { rowId:id, issuedQty:qty, remark });
+          if (res.success === false) { showToast(res.error, true); return; }
+          showToast('Shortage flagged — picker will decide');
+          await reload();
+        } catch (err) {
+          showToast('Failed: ' + err.message, true);
+        } finally {
+          b.disabled = false; b.textContent = 'Flag shortage';
+        }
+      }));
+  }
+}
+
+/* ================= STORE ================= */
+
+document.getElementById('store-date').addEventListener('change', loadStore);
+
+async function loadStore() {
+  const el = document.getElementById('store-list');
+  const date = document.getElementById('store-date').value;
+  el.innerHTML = '<div class="loading">Loading...</div>';
   try {
-    var sh = sheet(SHEET_PICKLIST);
-    var data = sh.getDataRange().getValues();
-    var bIdx = PICK_H.indexOf('BatchID'), rIdx = PICK_H.indexOf('Robot'),
-        pIdx = PICK_H.indexOf('ProcessNo'), dIdx = PICK_H.indexOf('DecisionStatus'),
-        sIdx = PICK_H.indexOf('Status'), dtIdx = PICK_H.indexOf('Date');
-    var now = new Date();
+    const data = await api('getRacks', { date });
+    storeCache = data.racks.filter(r => r.status === 'Pending').map(relink);
+    renderStore();
+    refreshBadges();
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
 
-    function inRack(i) {
-      if (String(data[i][bIdx]) !== String(batchId)) return false;
-      if (String(data[i][rIdx]).trim() !== robot) return false;
-      if (p.date && ymd(data[i][dtIdx]) !== p.date) return false;
-      return true;
-    }
-    function inProcess(i) {
-      return inRack(i) && String(data[i][pIdx]).trim() === proc;
-    }
+function renderStore() {
+  const el = document.getElementById('store-list');
+  if (!storeCache.length) { el.innerHTML = '<div class="empty-state">Nothing pending. All racks done.</div>'; return; }
+  el.innerHTML = storeCache.map(r => rackCard(r,'store')).join('');
+  bindRack(el, 'store', storeCache, renderStore, loadStore);
 
-    if (type === 'cancel') {
-      for (var i = 1; i < data.length; i++) {
-        if (!inRack(i)) continue;
-        var rn = i + 1;
-        sh.getRange(rn, colOf('Status')).setValue('Cancelled');
-        sh.getRange(rn, colOf('DecisionStatus')).setValue('Cancelled');
-        sh.getRange(rn, colOf('DecisionType')).setValue('Cancel robot');
-        sh.getRange(rn, colOf('DecisionBy')).setValue(by);
-        sh.getRange(rn, colOf('DecisionAt')).setValue(now);
+  el.querySelectorAll('[data-ready]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const by = document.getElementById('store-name').value.trim();
+      if (!by) { showToast('Enter your name first', true); return; }
+      b.disabled = true; b.textContent = 'Saving...';
+      try {
+        await api('markRackReady', { batchId:b.dataset.batch, robot:b.dataset.robot, by,
+          date: document.getElementById('store-date').value });
+        showToast(b.dataset.robot + ' rack sent to collect');
+        await loadStore();
+      } catch (err) {
+        showToast('Failed: ' + err.message, true);
+        b.disabled = false; b.textContent = 'Rack Ready';
       }
-      return { success:true, type:'cancel' };
-    }
+    }));
+}
 
-    if (type === 'drop') {
-      for (var j = 1; j < data.length; j++) {
-        if (!inProcess(j)) continue;
-        var rj = j + 1;
-        sh.getRange(rj, colOf('DecisionStatus')).setValue('Dropped');
-        sh.getRange(rj, colOf('DecisionType')).setValue('Drop process');
-        sh.getRange(rj, colOf('DecisionBy')).setValue(by);
-        sh.getRange(rj, colOf('DecisionAt')).setValue(now);
+/* ================= COLLECT ================= */
+
+document.getElementById('collect-date').addEventListener('change', loadCollect);
+
+async function loadCollect() {
+  const el = document.getElementById('collect-list');
+  const date = document.getElementById('collect-date').value;
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getRacks', { date });
+    collectCache = data.racks.filter(r => r.status === 'Ready').map(relink);
+    renderCollect();
+    refreshBadges();
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+function renderCollect() {
+  const el = document.getElementById('collect-list');
+  if (!collectCache.length) { el.innerHTML = '<div class="empty-state">No racks ready yet.</div>'; return; }
+
+  const needing = collectCache.filter(r => r.needsDecision).length;
+  const totalShort = collectCache.reduce((n,r) => n + r.parts.filter(isShort).length, 0);
+  let banner = '';
+  if (needing) {
+    banner = `<div class="alert-banner"><strong>${needing} rack(s) waiting on your decision.</strong>
+      Store is short on stock — choose what to do before collecting.</div>`;
+  } else if (totalShort) {
+    banner = `<div class="alert-banner"><strong>${totalShort} sub part(s) short.</strong>
+      Check the red notes before collecting.</div>`;
+  }
+
+  el.innerHTML = banner + collectCache.map(r => rackCard(r,'collect')).join('');
+  bindRack(el, 'collect', collectCache, renderCollect, loadCollect);
+
+  el.querySelectorAll('[data-dec]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const by = document.getElementById('collect-name').value.trim();
+      if (!by) { showToast('Enter your name first', true); return; }
+      const type = b.dataset.dec;
+
+      if (type === 'cancel' && !confirm('Cancel the whole ' + b.dataset.robot + ' rack?\n\n' +
+          'Nothing will be collected and it cannot be undone. You can then submit a fresh picklist for this robot.')) return;
+
+      b.disabled = true; b.textContent = 'Saving...';
+      try {
+        const res = await api('applyDecision', {
+          type, batchId:b.dataset.batch, robot:b.dataset.robot, processNo:b.dataset.proc, by,
+          date: document.getElementById('collect-date').value
+        });
+        if (res.success === false) { showToast(res.error, true); return; }
+        if (type === 'cancel') showToast(b.dataset.robot + ' cancelled — you can submit a new picklist for it');
+        else if (type === 'drop') showToast(b.dataset.proc + ' dropped — rack sent back to store');
+        else showToast(b.dataset.proc + ' set to ' + res.buildable + ' unit — rack sent back to store');
+        await loadCollect();
+      } catch (err) {
+        showToast('Failed: ' + err.message, true);
+      } finally {
+        b.disabled = false;
       }
-      // Whatever is left goes back to store to finish as one complete rack.
-      var remaining = 0;
-      for (var k = 1; k < data.length; k++) {
-        if (!inRack(k)) continue;
-        if (String(data[k][pIdx]).trim() === proc) continue;
-        if (data[k][dIdx] === 'Dropped' || data[k][sIdx] === 'Cancelled') continue;
-        sh.getRange(k + 1, colOf('Status')).setValue('Pending');
-        remaining++;
+    }));
+
+  el.querySelectorAll('[data-collect]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const by = document.getElementById('collect-name').value.trim();
+      if (!by) { showToast('Enter your name first', true); return; }
+      b.disabled = true; b.textContent = 'Saving...';
+      try {
+        await api('markRackCollected', { batchId:b.dataset.batch, robot:b.dataset.robot, by,
+          date: document.getElementById('collect-date').value });
+        showToast(b.dataset.robot + ' rack collected');
+        await loadCollect();
+      } catch (err) {
+        showToast('Failed: ' + err.message, true);
+        b.disabled = false; b.textContent = 'Collect Rack';
       }
-      return { success:true, type:'drop', remaining: remaining };
-    }
+    }));
+}
 
-    // partial — recompute from the process's own rows
-    var prRows = [];
-    for (var m = 1; m < data.length; m++) {
-      if (!inProcess(m)) continue;
-      if (data[m][dIdx] === 'Dropped') continue;
-      var obj = {};
-      PICK_H.forEach(function (h, idx) { obj[h] = data[m][idx]; });
-      obj._sheetRow = m + 1;
-      prRows.push(obj);
-    }
-    if (!prRows.length) throw new Error('Process not found in this rack');
+/* ================= HISTORY ================= */
 
-    var buildable = buildableUnits({ rows: prRows, qtyProcess: prRows[0].QtyProcess });
-    if (buildable <= 0) {
-      return { success:false, error:'Store has none of a required sub part — drop or cancel instead' };
-    }
+['hist-from','hist-to','hist-status','hist-short'].forEach(id =>
+  document.getElementById(id).addEventListener('change', loadHistory));
+document.getElementById('btn-hist-refresh').addEventListener('click', loadHistory);
 
-    prRows.forEach(function (r) {
-      var rn = r._sheetRow;
-      var per = Number(r.QtyPerUnit) || 1;
-      sh.getRange(rn, colOf('QtyProcess')).setValue(buildable);
-      sh.getRange(rn, colOf('RequiredQty')).setValue(buildable * per);
-      sh.getRange(rn, colOf('Picked')).setValue(false); // qty changed, re-pick
-      sh.getRange(rn, colOf('DecisionStatus')).setValue('Accepted');
-      sh.getRange(rn, colOf('DecisionType')).setValue('Run ' + buildable + ' unit');
-      sh.getRange(rn, colOf('DecisionBy')).setValue(by);
-      sh.getRange(rn, colOf('DecisionAt')).setValue(now);
+async function loadHistory() {
+  const el = document.getElementById('history-list');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getHistory', {
+      dateFrom: document.getElementById('hist-from').value,
+      dateTo: document.getElementById('hist-to').value,
+      status: document.getElementById('hist-status').value,
+      shortOnly: document.getElementById('hist-short').checked
     });
+    if (!data.racks.length) { el.innerHTML = '<div class="empty-state">No records found.</div>'; return; }
 
-    // Rest of the rack goes back too, so store hands over one complete rack.
-    for (var n = 1; n < data.length; n++) {
-      if (!inRack(n)) continue;
-      if (data[n][dIdx] === 'Dropped' || data[n][sIdx] === 'Cancelled') continue;
-      sh.getRange(n + 1, colOf('Status')).setValue('Pending');
-    }
+    el.innerHTML = data.racks.map((r,i) => {
+      const shorts = r.allRows.filter(isShort).length;
+      const procs = r.processes.map(p => p.processNo).join(', ');
+      const trail = [
+        'Sent by ' + esc(r.createdBy) + ' ' + fmtTime(r.createdAt),
+        r.readyBy ? 'Ready ' + esc(r.readyBy) + ' ' + fmtTime(r.readyAt) : '',
+        r.collectedBy ? 'Collected ' + esc(r.collectedBy) + ' ' + fmtTime(r.collectedAt) : ''
+      ].filter(Boolean).join(' &middot; ');
 
-    return { success:true, type:'partial', buildable: buildable };
-  } finally { lock.releaseLock(); }
+      const detail = r.processes.map(pr => {
+        const fn = fullName(pr.model, pr.partName);
+        const changed = pr.decisionStatus === 'Accepted' && pr.originalQtyProcess !== pr.qtyProcess;
+        return `
+        <div class="group-header">${esc(pr.processNo)} ${fn ? '&middot; ' + esc(fn) : ''}
+          ${pr.decisionStatus === 'Dropped' ? '<span class="badge badge-dropped">dropped</span>' : ''}
+          ${changed ? `<span class="badge badge-revised">${esc(pr.originalQtyProcess)} &rarr; ${esc(pr.qtyProcess)} unit</span>` : ''}
+          ${pr.decisionBy ? `<span class="chev">${esc(pr.decisionType)} by ${esc(pr.decisionBy)}</span>` : ''}
+        </div>
+        ${pr.rows.map(x => `
+          <div class="part-row">
+            <div class="info">
+              <div class="code">${esc(x.SubPartCode)}${isShort(x) ? '<span class="badge badge-short">was short</span>' : ''}</div>
+              <div class="meta">${x.Location ? esc(x.Location) : 'No location'} &middot; required ${esc(x.RequiredQty)}${
+                Number(x.OriginalRequiredQty) !== Number(x.RequiredQty) ? ' (was ' + esc(x.OriginalRequiredQty) + ')' : ''}${
+                x.IssuedQty !== '' && x.IssuedQty !== null ? ' &middot; store had ' + esc(x.IssuedQty) : ''}</div>
+              ${x.ShortageRemark ? `<div class="short-note">${esc(x.ShortageRemark)}</div>` : ''}
+            </div>
+          </div>`).join('')}`;
+      }).join('');
+
+      return `
+      <div class="hist-row">
+        <div class="hist-head" data-hist="${i}">
+          <div>
+            <div class="title">${esc(r.robot)}
+              <span class="badge badge-${String(r.status).toLowerCase()}">${esc(r.status)}</span>
+              ${shorts ? `<span class="badge badge-short">${shorts} short</span>` : ''}
+            </div>
+            <div class="sub">${esc(r.date)} &middot; ${esc(procs)} &middot; ${r.allRows.length} sub parts</div>
+            <div class="sub">${trail}</div>
+          </div>
+          <span class="chev" id="chev-${i}">Show parts &#9662;</span>
+        </div>
+        <div class="hist-body" id="histbody-${i}">${detail}</div>
+      </div>`;
+    }).join('');
+
+    el.querySelectorAll('[data-hist]').forEach(h =>
+      h.addEventListener('click', () => {
+        const i = h.dataset.hist;
+        const open = document.getElementById('histbody-' + i).classList.toggle('open');
+        document.getElementById('chev-' + i).innerHTML = open ? 'Hide parts &#9652;' : 'Show parts &#9662;';
+      }));
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
 }
 
-/* ---------------------------------------------------------- history */
+/* ================= DATABANK ================= */
 
-function getHistory(p) {
-  var rows = readPicklist();
-  if (p.dateFrom) rows = rows.filter(function (r) { return r.Date >= p.dateFrom; });
-  if (p.dateTo)   rows = rows.filter(function (r) { return r.Date <= p.dateTo; });
+let BOM_CACHE = [];
 
-  var map = {};
-  rows.forEach(function (r) {
-    var key = r.Date + '||' + r.BatchID + '||' + r.Robot;
-    if (!map[key]) map[key] = { batchId:r.BatchID, robot:r.Robot, date:r.Date, allRows:[] };
-    map[key].allRows.push(r);
+document.getElementById('db-search').addEventListener('input', renderDatabank);
+
+async function loadDatabank() {
+  const el = document.getElementById('db-list');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getBom');
+    BOM_CACHE = data.processes;
+    document.getElementById('stat-parents').textContent = data.processes.length;
+    document.getElementById('stat-rows').textContent = data.totalRows;
+    renderDatabank();
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+function renderDatabank() {
+  const q = document.getElementById('db-search').value.trim().toLowerCase();
+  let list = BOM_CACHE;
+  if (q) {
+    list = list.filter(p =>
+      p.processNo.toLowerCase().includes(q) ||
+      fullName(p.model, p.partName).toLowerCase().includes(q) ||
+      p.subParts.some(s => s.subPartCode.toLowerCase().includes(q)));
+  }
+  const el = document.getElementById('db-list');
+  if (!list.length) { el.innerHTML = '<div class="empty-state">Nothing found.</div>'; return; }
+
+  el.innerHTML = list.map(p => `
+    <div class="part-row">
+      <div class="info">
+        <div class="code">${esc(p.processNo)} <span class="proc-name">${esc(fullName(p.model, p.partName))}</span></div>
+        <div class="meta">${p.subParts.length} sub part${p.subParts.length===1?'':'s'}:
+          ${esc(p.subParts.map(s => s.subPartCode + (s.qtyPerUnit > 1 ? ' x' + s.qtyPerUnit : '') + (s.location ? ' @' + s.location : '')).join(', '))}</div>
+      </div>
+      <button class="btn btn-secondary btn-small" data-edit="${esc(p.processNo)}">Edit</button>
+      <button class="rm-btn" data-del="${esc(p.processNo)}" title="Delete">&times;</button>
+    </div>`).join('');
+
+  el.querySelectorAll('[data-edit]').forEach(b =>
+    b.addEventListener('click', () => openProcModal(b.dataset.edit)));
+  el.querySelectorAll('[data-del]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const code = b.dataset.del;
+      if (!confirm('Delete ' + code + ' and all its sub parts from the BOM sheet?')) return;
+      b.disabled = true;
+      try {
+        await api('deleteProcess', { processNo: code });
+        showToast(code + ' deleted');
+        await loadDatabank();
+      } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
+    }));
+}
+
+let editingCode = null;
+
+function openProcModal(code) {
+  editingCode = code || null;
+  document.getElementById('modal-title').textContent = code ? 'Edit Process No.' : 'New Process No.';
+  const p = code ? BOM_CACHE.find(x => x.processNo === code) : null;
+  document.getElementById('m-proc-code').value = code || '';
+  document.getElementById('m-model').value = p ? (p.model || '') : '';
+  document.getElementById('m-part-name').value = p ? (p.partName || '') : '';
+
+  const box = document.getElementById('m-children');
+  box.innerHTML = '';
+  if (p && p.subParts.length) p.subParts.forEach(s => addSubRow(s)); else addSubRow();
+  document.getElementById('modal-back').classList.add('open');
+}
+
+function addSubRow(s) {
+  const box = document.getElementById('m-children');
+  const div = document.createElement('div');
+  div.className = 'part-row';
+  div.style.gap = '6px';
+  div.innerHTML = `
+    <input type="text" class="ch-code" placeholder="Sub part code" value="${esc(s ? s.subPartCode : '')}" style="flex:2;">
+    <input type="number" class="ch-qty" min="1" placeholder="x" value="${esc(s ? (s.qtyPerUnit||1) : 1)}" style="width:64px;">
+    <input type="text" class="ch-loc" placeholder="Location" value="${esc(s ? (s.location||'') : '')}" style="flex:1.4;">
+    <button class="rm-btn" type="button">&times;</button>`;
+  div.querySelector('.rm-btn').addEventListener('click', () => div.remove());
+  box.appendChild(div);
+}
+
+document.getElementById('btn-add-child').addEventListener('click', () => addSubRow());
+document.getElementById('btn-new-parent').addEventListener('click', () => openProcModal(null));
+document.getElementById('btn-close-modal').addEventListener('click', () =>
+  document.getElementById('modal-back').classList.remove('open'));
+document.getElementById('modal-back').addEventListener('click', e => {
+  if (e.target.id === 'modal-back') e.currentTarget.classList.remove('open');
+});
+
+document.getElementById('btn-save-parent').addEventListener('click', async () => {
+  const code = document.getElementById('m-proc-code').value.trim();
+  const model = document.getElementById('m-model').value.trim();
+  const partName = document.getElementById('m-part-name').value.trim();
+  if (!code) { showToast('Enter a Process No.', true); return; }
+
+  const subParts = [];
+  document.querySelectorAll('#m-children .part-row').forEach(row => {
+    const cc = row.querySelector('.ch-code').value.trim();
+    if (!cc) return;
+    subParts.push({
+      subPartCode: cc,
+      qtyPerUnit: Number(row.querySelector('.ch-qty').value) || 1,
+      location: row.querySelector('.ch-loc').value.trim()
+    });
   });
+  if (!subParts.length) { showToast('Add at least one sub part', true); return; }
 
-  var racks = Object.keys(map).map(function (k) { return decorateRack(map[k]); });
-  if (p.status)    racks = racks.filter(function (r) { return r.status === p.status; });
-  if (p.shortOnly) racks = racks.filter(function (r) { return r.allRows.some(isShort); });
+  const btn = document.getElementById('btn-save-parent');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    await api('saveProcess', { processNo:code, model, partName, subParts, originalCode: editingCode });
+    document.getElementById('modal-back').classList.remove('open');
+    showToast(code + ' saved with ' + subParts.length + ' sub part(s)');
+    await loadDatabank();
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+});
 
-  racks.sort(function (a,b) { return new Date(b.createdAt) - new Date(a.createdAt); });
-  var limit = p.limit ? parseInt(p.limit, 10) : 150;
-  return { success:true, racks: racks.slice(0, limit) };
+/* ---------------- init ---------------- */
+
+if (API_URL.indexOf('PASTE_YOUR') !== -1) {
+  showToast('API_URL is not set yet — edit it at the top of this file', true);
 }
+loadRobots();
+if (ROLE) applyRole(ROLE);
+else document.getElementById('role-back').classList.add('open');
+</script>
+
+</body>
+</html>
