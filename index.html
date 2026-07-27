@@ -1219,7 +1219,11 @@ function renderStore() {
         await api('markRackReady', { batchId:b.dataset.batch, robot:b.dataset.robot, by,
           date: document.getElementById('store-date').value });
         showToast(b.dataset.robot + ' rack sent to collect');
-        await loadStore();
+        // The write already succeeded - drop it from the local list instead
+        // of paying for a second round-trip just to fetch the same result.
+        storeCache = storeCache.filter(r => rackKey(r) !== b.dataset.batch + '||' + b.dataset.robot);
+        renderStore();
+        refreshBadges();
       } catch (err) {
         showToast('Failed: ' + err.message, true);
         b.disabled = false; b.textContent = 'Rack Ready';
@@ -1299,7 +1303,9 @@ function renderCollect() {
         await api('markRackCollected', { batchId:b.dataset.batch, robot:b.dataset.robot, by,
           date: document.getElementById('collect-date').value });
         showToast(b.dataset.robot + ' rack collected');
-        await loadCollect();
+        collectCache = collectCache.filter(r => rackKey(r) !== b.dataset.batch + '||' + b.dataset.robot);
+        renderCollect();
+        refreshBadges();
       } catch (err) {
         showToast('Failed: ' + err.message, true);
         b.disabled = false; b.textContent = 'Collect Rack';
