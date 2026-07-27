@@ -321,6 +321,7 @@
       <input type="date" id="store-date">
       <label for="store-name">Your Name (Store)</label>
       <input type="text" id="store-name" placeholder="Your name">
+      <button class="btn btn-secondary btn-small" id="btn-store-refresh" style="margin-top:14px;">Refresh</button>
     </div>
     <div id="store-list"></div>
   </section>
@@ -332,6 +333,7 @@
       <input type="date" id="collect-date">
       <label for="collect-name">Your Name (Picker)</label>
       <input type="text" id="collect-name" placeholder="Your name">
+      <button class="btn btn-secondary btn-small" id="btn-collect-refresh" style="margin-top:14px;">Refresh</button>
     </div>
     <div id="collect-list"></div>
   </section>
@@ -398,6 +400,19 @@
       <button data-role="picker">Picker<small>Create &amp; Collect</small></button>
       <button data-role="store">Store<small>Store tab only</small></button>
       <button data-role="both">Supervisor<small>Everything</small></button>
+    </div>
+  </div>
+</div>
+
+<!-- ROLE PASSWORD -->
+<div class="modal-back" id="role-pw-back">
+  <div class="modal" style="max-width:360px;">
+    <h3 id="role-pw-title">Password</h3>
+    <div class="sub">Enter the password for this role.</div>
+    <input type="password" id="role-pw-input" placeholder="Password" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btn-role-pw-ok">Continue</button>
+      <button class="btn btn-secondary" id="btn-role-pw-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -506,6 +521,10 @@ const ROLE_TABS = {
   both:   ['create','store','collect','history']
 };
 const ROLE_LABEL = { picker:'Picker', store:'Store', both:'Supervisor' };
+// Same caveat as the databank PIN: this lives in client-side code and can be
+// read via "View Source" in seconds. It's a guard against picking the wrong
+// role by mistake, not real access control.
+const ROLE_PASSWORDS = { picker:'Picker1', store:'Store1', both:'Supervisor1' };
 let ROLE = null;
 try { ROLE = localStorage.getItem('wip_role'); } catch (e) {}
 
@@ -524,8 +543,36 @@ function applyRole(role) {
   if (first) first.click();
   refreshBadges();
 }
+
+let pendingRole = null;
 document.querySelectorAll('#role-back [data-role]').forEach(b =>
-  b.addEventListener('click', () => applyRole(b.dataset.role)));
+  b.addEventListener('click', () => {
+    pendingRole = b.dataset.role;
+    document.getElementById('role-pw-title').textContent = ROLE_LABEL[pendingRole] + ' password';
+    document.getElementById('role-pw-input').value = '';
+    document.getElementById('role-back').classList.remove('open');
+    document.getElementById('role-pw-back').classList.add('open');
+    setTimeout(() => document.getElementById('role-pw-input').focus(), 50);
+  }));
+
+function tryRolePassword() {
+  const el = document.getElementById('role-pw-input');
+  if (el.value === ROLE_PASSWORDS[pendingRole]) {
+    el.value = '';
+    document.getElementById('role-pw-back').classList.remove('open');
+    applyRole(pendingRole);
+  } else {
+    el.value = '';
+    showToast('Wrong password', true);
+  }
+}
+document.getElementById('btn-role-pw-ok').addEventListener('click', tryRolePassword);
+document.getElementById('role-pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') tryRolePassword(); });
+document.getElementById('btn-role-pw-cancel').addEventListener('click', () => {
+  document.getElementById('role-pw-back').classList.remove('open');
+  document.getElementById('role-back').classList.add('open');
+});
+
 document.getElementById('btn-change-role').addEventListener('click', () =>
   document.getElementById('role-back').classList.add('open'));
 
@@ -577,10 +624,14 @@ rememberName('collect-name','wip_picker');
 
 /* ---------------- badges ---------------- */
 
-async function refreshBadges() {
+/**
+ * Pass `racks` in when the caller has just fetched them for today - loadStore
+ * and loadCollect already hold exactly this data, and refetching it was
+ * doubling the wait on every tab open.
+ */
+async function refreshBadges(racks) {
   try {
-    const date = todayStr();
-    const data = await api('getRacks', { date });
+    const data = racks ? { racks } : await api('getRacks', { date: todayStr() });
     const pending = data.racks.filter(r => r.status === 'Pending').length;
     const ready = data.racks.filter(r => r.status === 'Ready').length;
     setBadge('store', pending);
@@ -600,7 +651,15 @@ function setBadge(tab, n) {
 // background instead - 10 minutes is frequent enough to feel "live" without
 // hammering Apps Script if several devices are left open all day.
 const BADGE_POLL_MS = 10 * 60 * 1000;
-setInterval(refreshBadges, BADGE_POLL_MS);
+setInterval(() => {
+  const active = document.querySelector('#main-nav .tab-btn.active');
+  const tab = active ? active.dataset.tab : null;
+  // Refreshing Store or Collect already updates the badges from the same
+  // response, so only fetch separately when neither is on screen.
+  if (tab === 'store') loadStore(true);
+  else if (tab === 'collect') loadCollect(true);
+  else refreshBadges();
+}, BADGE_POLL_MS);
 
 /* ================= CREATE ================= */
 
@@ -1188,21 +1247,41 @@ function bindRack(container, mode, cache, rerender, reload) {
 
 /* ================= STORE ================= */
 
-document.getElementById('store-date').addEventListener('change', loadStore);
+document.getElementById('store-date').addEventListener('change', () => loadStore());
 
-async function loadStore() {
+let storeCacheDate = null;
+
+/**
+ * force=false (tab click, date change): if this date was already loaded in
+ * this session, just render what's cached - no network call at all. That's
+ * what makes switching tabs instant instead of a 2-3s round trip every time.
+ * force=true (Refresh button, 10-min poll): always fetch, ignoring cache.
+ */
+async function loadStore(force) {
   const el = document.getElementById('store-list');
   const date = document.getElementById('store-date').value;
-  el.innerHTML = '<div class="loading">Loading...</div>';
+
+  if (!force && storeCacheDate === date) { renderStore(); return; }
+
+  // Only reuse what's on screen if it belongs to the SAME date, otherwise
+  // switching dates briefly shows the previous date's racks.
+  const hasStale = storeCacheDate === date && storeCache.length > 0;
+  if (hasStale) renderStore();
+  else el.innerHTML = '<div class="loading">Loading...</div>';
+
   try {
     const data = await api('getRacks', { date });
     storeCache = data.racks.filter(r => r.status === 'Pending').map(relink);
+    storeCacheDate = date;
     renderStore();
-    refreshBadges();
+    if (date === todayStr()) refreshBadges(data.racks);
+    else refreshBadges();
   } catch (err) {
-    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+    if (!hasStale) el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+    else showToast('Could not refresh: ' + err.message, true);
   }
 }
+document.getElementById('btn-store-refresh').addEventListener('click', () => loadStore(true));
 
 function renderStore() {
   const el = document.getElementById('store-list');
@@ -1233,21 +1312,33 @@ function renderStore() {
 
 /* ================= COLLECT ================= */
 
-document.getElementById('collect-date').addEventListener('change', loadCollect);
+document.getElementById('collect-date').addEventListener('change', () => loadCollect());
 
-async function loadCollect() {
+let collectCacheDate = null;
+
+async function loadCollect(force) {
   const el = document.getElementById('collect-list');
   const date = document.getElementById('collect-date').value;
-  el.innerHTML = '<div class="loading">Loading...</div>';
+
+  if (!force && collectCacheDate === date) { renderCollect(); return; }
+
+  const hasStale = collectCacheDate === date && collectCache.length > 0;
+  if (hasStale) renderCollect();
+  else el.innerHTML = '<div class="loading">Loading...</div>';
+
   try {
     const data = await api('getRacks', { date });
     collectCache = data.racks.filter(r => r.status === 'Ready').map(relink);
+    collectCacheDate = date;
     renderCollect();
-    refreshBadges();
+    if (date === todayStr()) refreshBadges(data.racks);
+    else refreshBadges();
   } catch (err) {
-    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+    if (!hasStale) el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+    else showToast('Could not refresh: ' + err.message, true);
   }
 }
+document.getElementById('btn-collect-refresh').addEventListener('click', () => loadCollect(true));
 
 function renderCollect() {
   const el = document.getElementById('collect-list');
