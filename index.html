@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WIP Store Picklist System</title>
+<style>
+  :root {
+    --primary:#1e5f8c; --primary-dark:#154a6e; --accent:#e8871e;
+    --bg:#f2f4f7; --card:#fff; --text:#1f2937; --muted:#6b7280;
+    --border:#e2e5e9; --pending:#94a3b8; --ready:#e8871e; --collected:#2e9e5b; --danger:#d64545;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { background:var(--primary); color:#fff; padding:12px 18px; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  header .subtitle { font-size:11px; opacity:.85; margin-top:2px; }
+  nav { display:flex; background:var(--primary-dark); overflow-x:auto; }
+  nav button { flex:1; min-width:100px; padding:13px 6px; background:none; border:none;
+               color:rgba(255,255,255,.65); font-size:13px; font-weight:600; cursor:pointer;
+               border-bottom:3px solid transparent; white-space:nowrap; }
+  nav button.active { color:#fff; border-bottom:3px solid var(--accent); background:rgba(255,255,255,.05); }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border-radius:10px; padding:18px; margin-bottom:14px;
+          box-shadow:0 1px 3px rgba(0,0,0,.06); border:1px solid var(--border); }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:14px 0 6px; }
+  label:first-child { margin-top:0; }
+  select, input { width:100%; padding:12px; font-size:15px; border:1px solid var(--border);
+                  border-radius:8px; background:#fff; color:var(--text); font-family:inherit; }
+  select:focus, input:focus { outline:none; border-color:var(--primary); }
+  .btn { width:100%; padding:14px; font-size:16px; font-weight:700; border:none;
+         border-radius:8px; cursor:pointer; margin-top:16px; }
+  .btn-primary { background:var(--primary); color:#fff; }
+  .btn-secondary { background:#fff; color:var(--primary); border:2px solid var(--primary); }
+  .btn-ready { background:var(--ready); color:#fff; }
+  .btn-collect { background:var(--collected); color:#fff; }
+  .btn-small { width:auto; padding:9px 16px; font-size:13px; margin-top:0; border-radius:6px; }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  .part-row { display:flex; align-items:center; gap:10px; border:1px solid var(--border);
+              border-radius:8px; padding:10px 12px; margin-bottom:8px; background:#fff; }
+  .part-row .info { flex:1; min-width:0; }
+  .part-row .code { font-size:15px; font-weight:600; }
+  .part-row .meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .qty-input { width:84px; padding:9px; text-align:center; margin:0; }
+  .rm-btn { background:none; border:none; color:var(--danger); font-size:20px; cursor:pointer; padding:0 4px; }
+
+  .search-add { margin-top:12px; position:relative; }
+  .search-results { margin-top:6px; max-height:260px; overflow-y:auto;
+                    border:1px solid var(--border); border-radius:8px; display:none; }
+  .search-results.open { display:block; }
+  .search-item { padding:12px 13px; border-bottom:1px solid var(--border); cursor:pointer; }
+  .search-item:last-child { border-bottom:none; }
+  .search-item:hover { background:#eef4f9; }
+  .search-item .sc { font-size:15px; font-weight:700; }
+  .search-item .sn { font-size:12px; color:var(--muted); margin-top:2px; }
+  .search-item.added { opacity:.45; }
+  .search-empty { padding:14px; text-align:center; color:var(--muted); font-size:13px; }
+
+  .rack { border:1px solid var(--border); border-radius:10px; margin-bottom:14px; overflow:hidden; background:#fff; }
+  .rack-head { padding:14px 16px; background:#f8fafc; border-bottom:1px solid var(--border);
+               display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  .rack-head .title { font-size:18px; font-weight:700; }
+  .rack-head .sub { font-size:12px; color:var(--muted); margin-top:3px; }
+  .rack-body { padding:14px 16px; }
+  .progress { font-size:12px; margin-top:5px; font-weight:600; color:var(--muted); }
+  .progress strong { color:var(--primary); }
+  .progress.done strong { color:var(--collected); }
+  .view-toggle { display:flex; border:1px solid var(--border); border-radius:7px; overflow:hidden; background:#fff; }
+  .view-toggle button { border:none; background:#fff; padding:8px 13px; font-size:12px; font-weight:600; color:var(--muted); cursor:pointer; }
+  .view-toggle button.on { background:var(--primary); color:#fff; }
+
+  .proc-block { border:1px solid var(--border); border-radius:9px; margin-bottom:10px; overflow:hidden; }
+  .proc-head { display:flex; align-items:center; gap:11px; padding:12px 13px; background:#f4f7fa; cursor:pointer; }
+  .proc-head:hover { background:#eaf0f6; }
+  .proc-chev { color:var(--muted); font-size:12px; width:12px; flex-shrink:0; }
+  .proc-code { font-size:17px; font-weight:800; }
+  .proc-name { font-size:12px; font-weight:600; color:var(--primary); margin-left:8px; text-transform:uppercase; }
+  .proc-meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .proc-body { padding:8px 13px 11px 13px; }
+  .proc-body.hidden { display:none; }
+
+  .sub-line { display:flex; align-items:center; gap:10px; padding:10px 11px; margin-bottom:7px;
+              border:1px solid var(--border); border-radius:8px; background:#fff; cursor:pointer; }
+  .sub-line:hover { background:#f8fafc; }
+  .sub-line.picked { background:#f2f8f4; border-color:#bfe0cb; }
+  .sub-line.picked .sub-code { text-decoration:line-through; color:var(--muted); }
+  .sub-arrow { color:#b6c2cf; font-size:14px; flex-shrink:0; }
+  .sub-code { font-size:15px; font-weight:600; }
+  .sub-meta { font-size:12px; color:var(--muted); margin-top:2px; }
+  .sub-qty { font-size:17px; font-weight:700; color:var(--primary); flex-shrink:0; }
+  .sub-line.picked .sub-qty { color:var(--muted); }
+  .sub-line .info { flex:1; min-width:0; }
+  .pick-box { width:26px; height:26px; border:2px solid #c8d2dc; border-radius:6px; flex-shrink:0;
+              display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700; color:#fff; background:#fff; }
+  .picked > .pick-box, .pick-box.on { background:var(--collected); border-color:var(--collected); }
+  .pick-box.partial { background:#fff; border-color:var(--collected); color:var(--collected); }
+
+  .loc-header { display:flex; align-items:center; gap:9px; margin:16px 0 8px; font-size:12px; font-weight:700;
+                color:var(--primary); text-transform:uppercase; }
+  .loc-header:first-child { margin-top:0; }
+  .loc-header .line { flex:1; height:1px; background:var(--border); }
+
+  .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; text-transform:uppercase; }
+  .badge-pending { background:#eef0f3; color:var(--pending); }
+  .badge-ready { background:#fdecd8; color:var(--ready); }
+  .badge-collected { background:#dff3e6; color:var(--collected); }
+  .badge-short { background:#fbe3e3; color:var(--danger); margin-left:6px; }
+
+  .short-note { background:#fbe3e3; border-left:3px solid var(--danger); padding:8px 10px;
+                border-radius:0 6px 6px 0; font-size:12px; color:#8a2b2b; margin-top:6px; }
+  .revise-box { margin:2px 0 10px 37px; }
+  .revise-inner { border:1px dashed var(--border); border-radius:8px; padding:10px; margin-top:6px; display:none; }
+  .revise-inner.open { display:block; }
+  .revise-inner .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .revise-inner .row input[type=text] { flex:1; min-width:150px; }
+  .link-btn { background:none; border:none; color:var(--primary); font-size:12px; cursor:pointer;
+              padding:3px 0; font-weight:600; text-decoration:underline; }
+
+  .empty-state { text-align:center; padding:30px 20px; color:var(--muted); font-size:14px; }
+  .loading { text-align:center; padding:20px; color:var(--muted); font-size:13px; }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--text); color:#fff;
+           padding:12px 22px; border-radius:8px; font-size:14px; opacity:0; transition:opacity .25s;
+           pointer-events:none; z-index:200; max-width:90%; text-align:center; }
+  .toast.show { opacity:1; }
+  .toast.error { background:var(--danger); }
+  .filters { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+  .filters select, .filters input { flex:1; min-width:130px; }
+  .group-header { font-size:13px; font-weight:700; color:var(--primary); margin:18px 0 8px; text-transform:uppercase; }
+  .group-header:first-child { margin-top:0; }
+  .alert-banner { background:#fbe3e3; border:1px solid #f0b8b8; color:#8a2b2b; padding:12px 14px;
+                  border-radius:8px; font-size:13px; margin-bottom:14px; }
+  .info-banner { background:#e6f0f8; border:1px solid #b9d4ea; color:#154a6e; padding:12px 14px;
+                 border-radius:8px; font-size:13px; margin-bottom:12px; }
+  .apply-all { display:flex; gap:8px; align-items:center; margin-bottom:12px; background:#f8fafc;
+               padding:10px 12px; border-radius:8px; border:1px solid var(--border); flex-wrap:wrap; }
+  .apply-all span { font-size:13px; font-weight:600; color:var(--muted); }
+
+  .hist-row { border:1px solid var(--border); border-radius:10px; margin-bottom:10px; background:#fff; overflow:hidden; }
+  .hist-head { padding:14px 16px; display:flex; justify-content:space-between; align-items:center; gap:12px; cursor:pointer; }
+  .hist-head:hover { background:#f8fafc; }
+  .hist-head .title { font-size:16px; font-weight:700; }
+  .hist-head .sub { font-size:12px; color:var(--muted); margin-top:3px; }
+  .hist-body { display:none; padding:0 16px 14px; border-top:1px solid var(--border); }
+  .hist-body.open { display:block; }
+  .chev { color:var(--muted); font-size:12px; margin-left:8px; white-space:nowrap; }
+
+  @media (max-width: 520px) {
+    .proc-code { font-size:15px; }
+    .proc-name { display:block; margin-left:0; margin-top:2px; }
+    .sub-qty { font-size:15px; }
+    .rack-head .title { font-size:16px; }
+    .revise-box { margin-left:0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>WIP Store Picklist</h1>
+  <div class="subtitle">One rack per robot &middot; draft</div>
+</header>
+
+<nav>
+  <button class="tab-btn active" data-tab="create">Create</button>
+  <button class="tab-btn" data-tab="store">Store</button>
+  <button class="tab-btn" data-tab="collect">Collect</button>
+  <button class="tab-btn" data-tab="history">History</button>
+</nav>
+
+<main>
+
+  <!-- CREATE -->
+  <section id="tab-create" class="tab-panel">
+    <div class="card">
+      <label for="create-date">Date</label>
+      <input type="date" id="create-date">
+      <label for="create-name">Picker Name</label>
+      <input type="text" id="create-name" placeholder="Your name">
+
+      <label for="robot-input">Robot</label>
+      <input list="robot-list" id="robot-input" placeholder="e.g. R17 — type a new one or pick a known one" autocomplete="off">
+      <datalist id="robot-list"></datalist>
+      <div class="hint">The system remembers which Process No. each robot runs. Sub parts are always pulled from the BOM automatically.</div>
+
+      <div id="robot-parts-card" style="display:none; margin-top:14px;">
+        <div id="robot-banner"></div>
+        <div class="apply-all">
+          <span>Same qty for all</span>
+          <input type="number" id="parent-all-qty" min="1" class="qty-input" placeholder="Qty">
+          <button class="btn btn-secondary btn-small" id="btn-parent-apply-all">Apply to all</button>
+        </div>
+        <div id="robot-parts-list"></div>
+
+        <div class="search-add">
+          <input type="text" id="proc-search" placeholder="Type to search Process No., model or part name..." autocomplete="off">
+          <div id="proc-results" class="search-results"></div>
+        </div>
+
+        <button class="btn btn-secondary" id="btn-add-queue">Add to Picklist</button>
+      </div>
+
+      <div id="queue-wrap" style="display:none; margin-top:20px;">
+        <label style="margin-top:0;">Queued for today</label>
+        <div id="queue-list"></div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-preview">Preview Picklist</button>
+    </div>
+
+    <div class="card" id="preview-card" style="display:none;">
+      <label style="margin-top:0;">Review before submitting</label>
+      <div class="apply-all">
+        <span>Set all sub part qty to</span>
+        <input type="number" id="apply-all-qty" min="0" class="qty-input" placeholder="Qty">
+        <button class="btn btn-secondary btn-small" id="btn-apply-all">Apply to all</button>
+      </div>
+      <div id="preview-list"></div>
+      <button class="btn btn-primary" id="btn-submit">Confirm &amp; Send to Store</button>
+      <button class="btn btn-secondary" id="btn-back">Back</button>
+    </div>
+  </section>
+
+  <!-- STORE -->
+  <section id="tab-store" class="tab-panel" style="display:none;">
+    <div class="card">
+      <label for="store-date">Date</label>
+      <input type="date" id="store-date">
+      <label for="store-name">Your Name (Store)</label>
+      <input type="text" id="store-name" placeholder="Your name">
+    </div>
+    <div id="store-list"></div>
+  </section>
+
+  <!-- COLLECT -->
+  <section id="tab-collect" class="tab-panel" style="display:none;">
+    <div class="card">
+      <label for="collect-date">Date</label>
+      <input type="date" id="collect-date">
+      <label for="collect-name">Your Name (Picker)</label>
+      <input type="text" id="collect-name" placeholder="Your name">
+    </div>
+    <div id="collect-list"></div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" class="tab-panel" style="display:none;">
+    <div class="filters">
+      <input type="date" id="hist-from">
+      <input type="date" id="hist-to">
+      <select id="hist-status">
+        <option value="">All status</option>
+        <option value="Pending">Pending</option>
+        <option value="Ready">Ready</option>
+        <option value="Collected">Collected</option>
+      </select>
+    </div>
+    <div class="filters">
+      <label style="margin:0; display:flex; align-items:center; gap:8px; font-weight:600;">
+        <input type="checkbox" id="hist-short" style="width:auto;"> Shortages only
+      </label>
+    </div>
+    <div id="history-list"></div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== CONFIGURE THIS =====
+const API_URL = 'https://script.google.com/macros/s/AKfycbwEp09uwArQzYddHqcmZ0b6WToz9kP4oifsyrehQ3jMnwm_2WdhZz0hMGW6ZJ22TSGh9g/exec';
+// ==========================
+
+function esc(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function todayStr() {
+  const d = new Date(), pad = n => String(n).padStart(2,'0');
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
+}
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('en-MY', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+}
+function showToast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { t.className = 'toast'; }, 3200);
+}
+function rememberName(id, key) {
+  const el = document.getElementById(id);
+  try {
+    const s = localStorage.getItem(key);
+    if (s) el.value = s;
+    el.addEventListener('change', () => localStorage.setItem(key, el.value.trim()));
+  } catch (e) {}
+}
+
+// POST as text/plain: avoids a CORS preflight Apps Script can't answer,
+// and avoids the URL length limit GET hits on big picklists.
+async function api(action, params = {}) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, params))
+  });
+  const data = await res.json();
+  if (!data.success && !data.duplicate) throw new Error(data.error || 'Request failed');
+  return data;
+}
+function fullName(model, partName) { return [model, partName].filter(Boolean).join(' '); }
+function isShort(r) { return r.IssuedQty !== '' && r.IssuedQty !== null && Number(r.IssuedQty) < Number(r.RequiredQty); }
+function locSort(a, b) {
+  if (!a && !b) return 0; if (!a) return 1; if (!b) return -1;
+  return a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' });
+}
+function groupByLocation(rows) {
+  const map = {};
+  rows.forEach(r => { const loc = (r.Location||'').trim(); (map[loc]=map[loc]||[]).push(r); });
+  return Object.keys(map).sort(locSort).map(loc => ({ loc, rows:map[loc] }));
+}
+
+/* ---------------- tabs ---------------- */
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).style.display = 'block';
+    if (btn.dataset.tab === 'store') renderStore();
+    if (btn.dataset.tab === 'collect') renderCollect();
+    if (btn.dataset.tab === 'history') renderHistory();
+  });
+});
+['create-date','store-date','collect-date'].forEach(id => document.getElementById(id).value = todayStr());
+rememberName('create-name','wip_picker_name');
+rememberName('store-name','wip_store_name');
+rememberName('collect-name','wip_picker_name');
+
+/* ---------------- create ---------------- */
+
+let shownProcs = [];
+let queued = [];
+let preview = [];
+
+async function loadRobots() {
+  try {
+    const data = await api('getRobots');
+    document.getElementById('robot-list').innerHTML =
+      data.robots.map(r => `<option value="${esc(r)}">`).join('');
+  } catch (err) { showToast('Could not load robots: ' + err.message, true); }
+}
+
+let robotDebounce;
+document.getElementById('robot-input').addEventListener('input', () => {
+  clearTimeout(robotDebounce);
+  robotDebounce = setTimeout(loadRobotProcs, 350);
+});
+document.getElementById('robot-input').addEventListener('change', loadRobotProcs);
+
+async function loadRobotProcs() {
+  const robot = document.getElementById('robot-input').value.trim();
+  const card = document.getElementById('robot-parts-card');
+  if (!robot) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  const banner = document.getElementById('robot-banner');
+  banner.innerHTML = '';
+  try {
+    const data = await api('getRecentProcesses', { robot });
+    if (data.firstTime || !data.processes.length) {
+      banner.innerHTML = `<div class="info-banner">First time using <strong>${esc(robot)}</strong>.
+        Search and add its Process No. below — next time they come up automatically.</div>`;
+      shownProcs = [];
+    } else {
+      shownProcs = data.processes.map(p => ({ code:p.code, model:p.model, partName:p.partName, lastUsed:p.lastUsed }));
+    }
+    renderRobotProcs();
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  }
+}
+
+function renderRobotProcs() {
+  const list = document.getElementById('robot-parts-list');
+  if (!shownProcs.length) { list.innerHTML = '<div class="empty-state">No Process No. yet — search and add below.</div>'; return; }
+
+  list.innerHTML = shownProcs.map((p,i) => `
+    <div class="part-row">
+      <div class="info">
+        <div class="code">${esc(p.code)}</div>
+        <div class="meta">${esc(fullName(p.model, p.partName))}${p.lastUsed ? ' &middot; last used ' + esc(p.lastUsed) : ''}</div>
+      </div>
+      <input type="number" class="qty-input proc-qty" min="1" placeholder="Qty"
+             data-code="${esc(p.code)}" data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
+      <button class="rm-btn" data-rm="${i}" title="Remove">&times;</button>
+    </div>`).join('');
+
+  list.querySelectorAll('[data-rm]').forEach(b => {
+    b.addEventListener('click', () => { shownProcs.splice(Number(b.dataset.rm),1); renderRobotProcs(); });
+  });
+}
+
+document.getElementById('btn-parent-apply-all').addEventListener('click', () => {
+  const el = document.getElementById('parent-all-qty');
+  const v = Number(el.value);
+  if (el.value === '' || !(v > 0)) { showToast('Enter a qty first', true); return; }
+  const inputs = document.querySelectorAll('.proc-qty');
+  if (!inputs.length) { showToast('Nothing listed yet', true); return; }
+  inputs.forEach(inp => inp.value = v);
+  showToast('All ' + inputs.length + ' Process No. set to ' + v);
+});
+
+let searchDebounce;
+document.getElementById('proc-search').addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(runProcSearch, 250);
+});
+document.getElementById('proc-search').addEventListener('focus', runProcSearch);
+
+async function runProcSearch() {
+  const q = document.getElementById('proc-search').value.trim();
+  const box = document.getElementById('proc-results');
+  if (!q) { box.className = 'search-results'; box.innerHTML = ''; return; }
+  try {
+    const data = await api('searchProcesses', { q });
+    box.className = 'search-results open';
+    if (!data.processes.length) { box.innerHTML = '<div class="search-empty">Nothing matches that.</div>'; return; }
+    box.innerHTML = data.processes.map(p => {
+      const already = shownProcs.some(s => s.code === p.code);
+      return `<div class="search-item${already ? ' added' : ''}" data-add="${esc(p.code)}"
+                data-model="${esc(p.model||'')}" data-name="${esc(p.partName||'')}">
+        <div class="sc">${esc(p.code)}${already ? ' &check; added' : ''}</div>
+        <div class="sn">${esc(fullName(p.model, p.partName))}</div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-add]').forEach(it => {
+      it.addEventListener('click', () => {
+        const code = it.dataset.add;
+        if (shownProcs.some(p => p.code === code)) { showToast('Already in the list', true); return; }
+        shownProcs.push({ code, model:it.dataset.model, partName:it.dataset.name });
+        document.getElementById('proc-search').value = '';
+        box.className = 'search-results'; box.innerHTML = '';
+        renderRobotProcs();
+        showToast(code + ' added');
+      });
+    });
+  } catch (err) { showToast('Search failed: ' + err.message, true); }
+}
+
+document.getElementById('btn-add-queue').addEventListener('click', () => {
+  const robot = document.getElementById('robot-input').value.trim();
+  if (!robot) { showToast('Enter a robot first', true); return; }
+  let added = 0;
+  document.querySelectorAll('.proc-qty').forEach(inp => {
+    const qty = Number(inp.value);
+    if (qty > 0) {
+      const code = inp.dataset.code;
+      const f = queued.find(q => q.robot === robot && q.processNo === code);
+      if (f) f.qty = qty;
+      else queued.push({ robot, processNo:code, model:inp.dataset.model, partName:inp.dataset.name, qty });
+      added++;
+    }
+  });
+  if (!added) { showToast('Fill in at least one qty first', true); return; }
+  renderQueue();
+  document.getElementById('robot-input').value = '';
+  document.getElementById('parent-all-qty').value = '';
+  document.getElementById('robot-parts-card').style.display = 'none';
+  shownProcs = [];
+  showToast(added + ' Process No. added for ' + robot);
+});
+
+function renderQueue() {
+  const wrap = document.getElementById('queue-wrap');
+  const el = document.getElementById('queue-list');
+  if (!queued.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  const byRobot = {};
+  queued.forEach((q,i) => (byRobot[q.robot] = byRobot[q.robot] || []).push({ ...q, _i:i }));
+  el.innerHTML = Object.keys(byRobot).sort().map(robot => `
+    <div class="group-header">${esc(robot)}</div>
+    ${byRobot[robot].map(q => `
+      <div class="part-row">
+        <div class="info">
+          <div class="code">${esc(q.processNo)}</div>
+          <div class="meta">${esc(fullName(q.model, q.partName))} &middot; qty ${esc(q.qty)}</div>
+        </div>
+        <button class="rm-btn" data-q="${q._i}">&times;</button>
+      </div>`).join('')}`).join('');
+  el.querySelectorAll('[data-q]').forEach(b => {
+    b.addEventListener('click', () => { queued.splice(Number(b.dataset.q),1); renderQueue(); });
+  });
+}
+
+document.getElementById('btn-preview').addEventListener('click', async () => {
+  const date = document.getElementById('create-date').value;
+  const name = document.getElementById('create-name').value.trim();
+  if (!date || !name) { showToast('Fill in date and your name', true); return; }
+  if (!queued.length) { showToast('Add at least one Process No. first', true); return; }
+
+  const btn = document.getElementById('btn-preview');
+  btn.disabled = true; btn.textContent = 'Loading...';
+  try {
+    const data = await api('previewPicklist', { items: queued.map(q => ({ robot:q.robot, processNo:q.processNo, qty:q.qty })) });
+    if (data.notFound && data.notFound.length) showToast('No BOM entry for: ' + data.notFound.join(', '), true);
+    preview = data.preview.map(p => ({ ...p, qtyProcess:p.qtyProcess }));
+    // carry model/partName from queue in case BOM lookup didn't have it duplicated per row
+    renderPreview();
+    const card = document.getElementById('preview-card');
+    card.style.display = 'block';
+    card.scrollIntoView({ behavior:'smooth' });
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Preview Picklist';
+  }
+});
+
+document.getElementById('btn-apply-all').addEventListener('click', () => {
+  const el = document.getElementById('apply-all-qty');
+  const v = Number(el.value);
+  if (el.value === '' || !(v >= 0)) { showToast('Enter a qty first', true); return; }
+  preview.forEach(p => p.requiredQty = v);
+  renderPreview();
+  showToast('All ' + preview.length + ' sub part lines set to ' + v);
+});
+
+function renderPreview() {
+  const el = document.getElementById('preview-list');
+  if (!preview.length) { el.innerHTML = '<div class="empty-state">Nothing to show.</div>'; return; }
+  const groups = {};
+  preview.forEach((it,i) => {
+    const key = it.robot + '||' + it.processNo + '||' + it.qtyProcess + '||' + fullName(it.model, it.partName);
+    (groups[key] = groups[key] || []).push({ ...it, _i:i });
+  });
+  el.innerHTML = Object.keys(groups).map(key => {
+    const [robot, proc, qty, fn] = key.split('||');
+    return `
+    <div class="group-header">${esc(robot)} &mdash; ${esc(proc)} ${fn ? '(' + esc(fn) + ')' : ''} &middot; ${esc(qty)} unit</div>
+    ${groups[key].map(it => `
+      <div class="part-row">
+        <div class="info">
+          <div class="code">${esc(it.subPartCode)}</div>
+          <div class="meta">${it.location ? esc(it.location) : 'No location set'}${it.qtyPerUnit > 1 ? ' &middot; x' + it.qtyPerUnit + ' per unit' : ''}</div>
+        </div>
+        <input type="number" class="qty-input pv-qty" min="0" value="${esc(it.requiredQty)}" data-i="${it._i}">
+        <button class="rm-btn" data-pv="${it._i}">&times;</button>
+      </div>`).join('')}`;
+  }).join('');
+  el.querySelectorAll('.pv-qty').forEach(inp => {
+    inp.addEventListener('input', () => { preview[Number(inp.dataset.i)].requiredQty = Number(inp.value) || 0; });
+  });
+  el.querySelectorAll('[data-pv]').forEach(b => {
+    b.addEventListener('click', () => { preview.splice(Number(b.dataset.pv),1); renderPreview(); });
+  });
+}
+
+document.getElementById('btn-back').addEventListener('click', () => {
+  document.getElementById('preview-card').style.display = 'none';
+});
+
+document.getElementById('btn-submit').addEventListener('click', () => doSubmit(false));
+
+async function doSubmit(force) {
+  const date = document.getElementById('create-date').value;
+  const name = document.getElementById('create-name').value.trim();
+  if (!preview.length) { showToast('Nothing to submit', true); return; }
+
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true; btn.textContent = 'Submitting...';
+  try {
+    const data = await api('submitPicklist', { date, createdBy:name, rows:preview, force });
+    if (data.duplicate) {
+      btn.disabled = false; btn.textContent = 'Confirm & Send to Store';
+      const ok = confirm('Already sent today and not yet collected:\n\n' + data.duplicates.join('\n') + '\n\nSend anyway?');
+      if (ok) await doSubmit(true);
+      return;
+    }
+    showToast('Sent to store: ' + data.rowsCreated + ' sub part lines');
+    document.getElementById('preview-card').style.display = 'none';
+    queued = []; preview = [];
+    renderQueue();
+    loadRobots();
+  } catch (err) {
+    showToast('Failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirm & Send to Store';
+  }
+}
+
+/* ---------------- shared rack rendering ---------------- */
+
+const collapsed = new Set();
+const rackView = {};
+function rackKey(r) { return r.batchId + '||' + r.robot; }
+
+function subLine(r, mode, showProc) {
+  const short = isShort(r);
+  const picked = r.Picked === true || r.Picked === 'TRUE';
+  return `
+  <div class="sub-line${picked ? ' picked' : ''}" data-pick="${esc(r.RowID)}">
+    <span class="sub-arrow">&#8627;</span>
+    <div class="pick-box">${picked ? '&#10003;' : ''}</div>
+    <div class="info">
+      <div class="sub-code">${esc(r.SubPartCode)}${short ? '<span class="badge badge-short">short</span>' : ''}</div>
+      <div class="sub-meta">${showProc ? '<strong>' + esc(r.ProcessNo) + '</strong> &middot; ' : ''}${r.Location ? esc(r.Location) : 'No location'}</div>
+      ${r.IssuedQty !== '' && r.IssuedQty !== null ? `<div class="sub-meta">Issued <strong>${esc(r.IssuedQty)}</strong> of ${esc(r.RequiredQty)}</div>` : ''}
+      ${r.ShortageRemark ? `<div class="short-note">${esc(r.ShortageRemark)}</div>` : ''}
+    </div>
+    <div class="sub-qty">${esc(r.RequiredQty)}</div>
+  </div>
+  ${mode === 'store' ? `
+  <div class="revise-box">
+    <button class="link-btn" data-toggle="${esc(r.RowID)}">Not enough stock?</button>
+    <div class="revise-inner" id="rev-${esc(r.RowID)}">
+      <div class="row">
+        <input type="number" min="0" class="qty-input" style="width:110px;" id="qty-${esc(r.RowID)}" placeholder="Have" value="${esc(r.IssuedQty)}">
+        <input type="text" id="rmk-${esc(r.RowID)}" placeholder="Note for the picker" value="${esc(r.ShortageRemark)}">
+      </div>
+      <button class="btn btn-secondary btn-small" style="margin-top:8px;" data-revise="${esc(r.RowID)}">Flag shortage</button>
+    </div>
+  </div>` : ''}`;
+}
+
+function processTree(rack, mode) {
+  return rack.processes.map(pr => {
+    const key = rackKey(rack) + '||' + pr.processNo;
+    const isOpen = !collapsed.has(key);
+    const total = pr.rows.length, done = pr.pickedCount;
+    const allDone = total > 0 && done === total, someDone = done > 0 && done < total;
+    const fn = fullName(pr.model, pr.partName);
+    return `
+    <div class="proc-block">
+      <div class="proc-head" data-proc="${esc(key)}">
+        <span class="proc-chev">${isOpen ? '&#9662;' : '&#9656;'}</span>
+        <div class="pick-box ${allDone ? 'on' : (someDone ? 'partial' : '')}"
+             data-procpick="${esc(rack.batchId)}||${esc(rack.robot)}||${esc(pr.processNo)}">${allDone ? '&#10003;' : (someDone ? '&#8211;' : '')}</div>
+        <div style="flex:1; min-width:0;">
+          <div><span class="proc-code">${esc(pr.processNo)}</span>${fn ? `<span class="proc-name">${esc(fn)}</span>` : ''}</div>
+          <div class="proc-meta">${esc(pr.qtyProcess)} unit &middot; ${total} sub parts &middot; <strong>${done}/${total}</strong> picked</div>
+        </div>
+      </div>
+      <div class="proc-body${isOpen ? '' : ' hidden'}">${pr.rows.map(r => subLine(r, mode, false)).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+function locationList(rack, mode) {
+  return groupByLocation(rack.parts).map(g => `
+    <div class="loc-header"><span>${esc(g.loc || 'No location set')}</span><span class="line"></span><span>${g.rows.length}</span></div>
+    ${g.rows.map(r => subLine(r, mode, true)).join('')}`).join('');
+}
+
+function rackCard(rack, mode) {
+  const key = rackKey(rack);
+  const view = mode === 'store' ? (rackView[key] || 'process') : 'process';
+  const total = rack.parts.length, done = rack.pickedCount;
+  const allPicked = total > 0 && done === total;
+
+  const action = mode === 'store'
+    ? `<button class="btn btn-ready btn-small" data-ready="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}" ${allPicked ? '' : 'disabled'}>Rack Ready</button>`
+    : `<button class="btn btn-collect btn-small" data-collect="1" data-batch="${esc(rack.batchId)}" data-robot="${esc(rack.robot)}">Collect Rack</button>`;
+
+  return `
+  <div class="rack" data-rackkey="${esc(key)}">
+    <div class="rack-head">
+      <div>
+        <div class="title">${esc(rack.robot)}
+          <span class="badge badge-${String(rack.status).toLowerCase()}">${esc(rack.status)}</span>
+          ${rack.shortCount ? `<span class="badge badge-short">${rack.shortCount} short</span>` : ''}
+        </div>
+        <div class="sub">${esc(rack.processes.map(p => p.processNo).join(', '))} &middot; ${total} sub parts</div>
+        <div class="progress${allPicked ? ' done' : ''}"><strong>${done}/${total}</strong> ${allPicked ? 'all ticked' : 'ticked'}${!allPicked && mode === 'store' ? ' — tick everything to enable Rack Ready' : ''}</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        ${mode === 'store' ? `
+        <div class="view-toggle">
+          <button class="${view==='process'?'on':''}" data-view="process" data-rk="${esc(key)}">By Process No.</button>
+          <button class="${view==='location'?'on':''}" data-view="location" data-rk="${esc(key)}">By Location</button>
+        </div>` : ''}
+        ${action}
+      </div>
+    </div>
+    <div class="rack-body">${view === 'process' ? processTree(rack, mode) : locationList(rack, mode)}</div>
+  </div>`;
+}
+
+function bindRack(container, mode, rerender) {
+  container.querySelectorAll('[data-view]').forEach(b => {
+    b.addEventListener('click', e => { e.stopPropagation(); rackView[b.dataset.rk] = b.dataset.view; rerender(); });
+  });
+  container.querySelectorAll('[data-proc]').forEach(h => {
+    h.addEventListener('click', e => {
+      if (e.target.closest('[data-procpick]')) return;
+      const k = h.dataset.proc;
+      if (collapsed.has(k)) collapsed.delete(k); else collapsed.add(k);
+      rerender();
+    });
+  });
+  container.querySelectorAll('[data-procpick]').forEach(box => {
+    box.addEventListener('click', async e => {
+      e.stopPropagation();
+      const [batchId, robot, processNo] = box.dataset.procpick.split('||');
+      const nowOn = !box.classList.contains('on');
+      box.style.opacity = '.5';
+      try {
+        await api('toggleProcessPick', { batchId, robot, processNo, picked: nowOn });
+        rerender();
+      } catch (err) { showToast('Failed: ' + err.message, true); box.style.opacity = '1'; }
+    });
+  });
+  container.querySelectorAll('[data-pick]').forEach(row => {
+    row.addEventListener('click', async () => {
+      const nowOn = !row.classList.contains('picked');
+      row.style.opacity = '.5';
+      try {
+        await api('toggleSubPick', { rowId: row.dataset.pick, picked: nowOn });
+        rerender();
+      } catch (err) { showToast('Failed: ' + err.message, true); row.style.opacity = '1'; }
+    });
+  });
+  if (mode === 'store') {
+    container.querySelectorAll('[data-toggle]').forEach(b => {
+      b.addEventListener('click', e => { e.stopPropagation(); document.getElementById('rev-' + b.dataset.toggle).classList.toggle('open'); });
+    });
+    container.querySelectorAll('.revise-inner').forEach(box => box.addEventListener('click', e => e.stopPropagation()));
+    container.querySelectorAll('[data-revise]').forEach(b => {
+      b.addEventListener('click', async e => {
+        e.stopPropagation();
+        const by = document.getElementById('store-name').value.trim();
+        if (!by) { showToast('Enter your name first', true); return; }
+        const id = b.dataset.revise;
+        const qty = document.getElementById('qty-' + id).value;
+        const remark = document.getElementById('rmk-' + id).value.trim();
+        if (qty === '') { showToast('Enter how many you have', true); return; }
+        try {
+          await api('reviseQty', { rowId:id, issuedQty:qty, remark });
+          showToast('Shortage flagged');
+          rerender();
+        } catch (err) { showToast('Failed: ' + err.message, true); }
+      });
+    });
+  }
+}
+
+/* ---------------- store ---------------- */
+
+document.getElementById('store-date').addEventListener('change', renderStore);
+
+async function renderStore() {
+  const el = document.getElementById('store-list');
+  const date = document.getElementById('store-date').value;
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getRacks', { date });
+    const racks = data.racks.filter(r => r.status === 'Pending')
+      .map(r => ({ ...r, parts:r.rows }));
+    if (!racks.length) { el.innerHTML = '<div class="empty-state">Nothing pending. All racks done.</div>'; return; }
+    el.innerHTML = racks.map(r => rackCard(r,'store')).join('');
+    bindRack(el, 'store', renderStore);
+
+    el.querySelectorAll('[data-ready]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const by = document.getElementById('store-name').value.trim();
+        if (!by) { showToast('Enter your name first', true); return; }
+        b.disabled = true;
+        try {
+          await api('markRackReady', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
+          showToast(b.dataset.robot + ' rack sent to collect');
+          renderStore();
+        } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
+      });
+    });
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+/* ---------------- collect ---------------- */
+
+document.getElementById('collect-date').addEventListener('change', renderCollect);
+
+async function renderCollect() {
+  const el = document.getElementById('collect-list');
+  const date = document.getElementById('collect-date').value;
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getRacks', { date });
+    const racks = data.racks.filter(r => r.status === 'Ready').map(r => ({ ...r, parts:r.rows }));
+    if (!racks.length) { el.innerHTML = '<div class="empty-state">No racks ready yet.</div>'; return; }
+
+    const totalShort = racks.reduce((n,r) => n + r.shortCount, 0);
+    const banner = totalShort ? `<div class="alert-banner"><strong>${totalShort} sub part(s) short.</strong>
+      Store revised the qty — check the red notes before collecting.</div>` : '';
+
+    el.innerHTML = banner + racks.map(r => rackCard(r,'collect')).join('');
+    bindRack(el, 'collect', renderCollect);
+
+    el.querySelectorAll('[data-collect]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const by = document.getElementById('collect-name').value.trim();
+        if (!by) { showToast('Enter your name first', true); return; }
+        b.disabled = true;
+        try {
+          await api('markRackCollected', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
+          showToast(b.dataset.robot + ' rack collected');
+          renderCollect();
+        } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
+      });
+    });
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+/* ---------------- history ---------------- */
+
+['hist-from','hist-to','hist-status','hist-short'].forEach(id => document.getElementById(id).addEventListener('change', renderHistory));
+
+async function renderHistory() {
+  const el = document.getElementById('history-list');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const data = await api('getHistory', {
+      dateFrom: document.getElementById('hist-from').value,
+      dateTo: document.getElementById('hist-to').value,
+      status: document.getElementById('hist-status').value,
+      shortOnly: document.getElementById('hist-short').checked
+    });
+    if (!data.racks.length) { el.innerHTML = '<div class="empty-state">No records found.</div>'; return; }
+
+    el.innerHTML = data.racks.map((r,i) => {
+      const shorts = r.rows.filter(isShort).length;
+      const procs = [...new Set(r.rows.map(x => x.ProcessNo))].join(', ');
+      const trail = [
+        'Sent by ' + esc(r.createdBy) + ' ' + fmtTime(r.createdAt),
+        r.readyBy ? 'Ready ' + esc(r.readyBy) + ' ' + fmtTime(r.readyAt) : '',
+        r.collectedBy ? 'Collected ' + esc(r.collectedBy) + ' ' + fmtTime(r.collectedAt) : ''
+      ].filter(Boolean).join(' &middot; ');
+
+      const byProc = {};
+      r.rows.forEach(x => (byProc[x.ProcessNo] = byProc[x.ProcessNo] || []).push(x));
+      const detail = Object.keys(byProc).map(pc => {
+        const rows = byProc[pc];
+        const fn = fullName(rows[0].Model, rows[0].PartName);
+        return `
+        <div class="group-header">${esc(pc)} ${fn ? '&middot; ' + esc(fn) : ''}</div>
+        ${rows.map(x => `
+          <div class="part-row">
+            <div class="info">
+              <div class="code">${esc(x.SubPartCode)}${isShort(x) ? '<span class="badge badge-short">was short</span>' : ''}</div>
+              <div class="meta">${x.Location ? esc(x.Location) : 'No location'} &middot; required ${esc(x.RequiredQty)}${
+                x.IssuedQty !== '' && x.IssuedQty !== null ? ' &middot; store had ' + esc(x.IssuedQty) : ''}</div>
+              ${x.ShortageRemark ? `<div class="short-note">${esc(x.ShortageRemark)}</div>` : ''}
+            </div>
+          </div>`).join('')}`;
+      }).join('');
+
+      return `
+      <div class="hist-row">
+        <div class="hist-head" data-hist="${i}">
+          <div>
+            <div class="title">${esc(r.robot)}
+              <span class="badge badge-${String(r.status).toLowerCase()}">${esc(r.status)}</span>
+              ${shorts ? `<span class="badge badge-short">${shorts} short</span>` : ''}
+            </div>
+            <div class="sub">${esc(r.date)} &middot; ${esc(procs)} &middot; ${r.rows.length} sub parts</div>
+            <div class="sub">${trail}</div>
+          </div>
+          <span class="chev" id="chev-${i}">Show parts &#9662;</span>
+        </div>
+        <div class="hist-body" id="histbody-${i}">${detail}</div>
+      </div>`;
+    }).join('');
+
+    el.querySelectorAll('[data-hist]').forEach(h => {
+      h.addEventListener('click', () => {
+        const i = h.dataset.hist;
+        const open = document.getElementById('histbody-' + i).classList.toggle('open');
+        document.getElementById('chev-' + i).innerHTML = open ? 'Hide parts &#9652;' : 'Show parts &#9662;';
+      });
+    });
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+/* ---------------- init ---------------- */
+loadRobots();
+</script>
+
+</body>
+</html>
