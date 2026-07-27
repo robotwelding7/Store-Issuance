@@ -270,7 +270,7 @@
 
 <script>
 // ===== CONFIGURE THIS =====
-const API_URL = 'https://script.google.com/macros/s/AKfycbwEp09uwArQzYddHqcmZ0b6WToz9kP4oifsyrehQ3jMnwm_2WdhZz0hMGW6ZJ22TSGh9g/exec';
+const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
 // ==========================
 
 function esc(s) {
@@ -316,7 +316,30 @@ async function api(action, params = {}) {
   return data;
 }
 function fullName(model, partName) { return [model, partName].filter(Boolean).join(' '); }
+function isPicked(r) { return r.Picked === true || r.Picked === 'TRUE'; }
 function isShort(r) { return r.IssuedQty !== '' && r.IssuedQty !== null && Number(r.IssuedQty) < Number(r.RequiredQty); }
+
+/**
+ * The server returns rack.parts and rack.processes[].rows as separate
+ * copies once serialized to JSON (object identity doesn't survive the
+ * round trip), so mutating a row found via rack.parts wouldn't be
+ * reflected in the tree view, which reads rack.processes[].rows.
+ * This rebuilds processes from parts using the SAME object references,
+ * and counts are computed fresh from rack.parts on every render instead
+ * of trusting a count captured at fetch time - so a tick is reflected
+ * everywhere immediately.
+ */
+function decorateClient(rack) {
+  const procMap = {};
+  rack.parts.forEach(r => {
+    if (!procMap[r.ProcessNo]) {
+      procMap[r.ProcessNo] = { processNo:r.ProcessNo, model:r.Model, partName:r.PartName, qtyProcess:r.QtyProcess, rows: [] };
+    }
+    procMap[r.ProcessNo].rows.push(r);
+  });
+  rack.processes = Object.keys(procMap).sort().map(k => procMap[k]);
+  return rack;
+}
 function locSort(a, b) {
   if (!a && !b) return 0; if (!a) return 1; if (!b) return -1;
   return a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' });
@@ -603,6 +626,21 @@ const collapsed = new Set();
 const rackView = {};
 function rackKey(r) { return r.batchId + '||' + r.robot; }
 
+// Cache of the last getRacks() response for each tab, so a single tick can
+// update the screen instantly (no loading flash) instead of re-fetching the
+// whole Picklist sheet on every tap. The API call still happens - it just
+// happens in the background instead of blocking the UI.
+let storeRacksCache = [];
+let collectRacksCache = [];
+
+function findRowInCache(cache, rowId) {
+  for (const rack of cache) {
+    const row = rack.parts.find(r => r.RowID === rowId);
+    if (row) return row;
+  }
+  return null;
+}
+
 function subLine(r, mode, showProc) {
   const short = isShort(r);
   const picked = r.Picked === true || r.Picked === 'TRUE';
@@ -635,7 +673,7 @@ function processTree(rack, mode) {
   return rack.processes.map(pr => {
     const key = rackKey(rack) + '||' + pr.processNo;
     const isOpen = !collapsed.has(key);
-    const total = pr.rows.length, done = pr.pickedCount;
+    const total = pr.rows.length, done = pr.rows.filter(isPicked).length;
     const allDone = total > 0 && done === total, someDone = done > 0 && done < total;
     const fn = fullName(pr.model, pr.partName);
     return `
@@ -663,7 +701,8 @@ function locationList(rack, mode) {
 function rackCard(rack, mode) {
   const key = rackKey(rack);
   const view = mode === 'store' ? (rackView[key] || 'process') : 'process';
-  const total = rack.parts.length, done = rack.pickedCount;
+  const total = rack.parts.length, done = rack.parts.filter(isPicked).length;
+  const shortCount = rack.parts.filter(isShort).length;
   const allPicked = total > 0 && done === total;
 
   const action = mode === 'store'
@@ -676,7 +715,7 @@ function rackCard(rack, mode) {
       <div>
         <div class="title">${esc(rack.robot)}
           <span class="badge badge-${String(rack.status).toLowerCase()}">${esc(rack.status)}</span>
-          ${rack.shortCount ? `<span class="badge badge-short">${rack.shortCount} short</span>` : ''}
+          ${shortCount ? `<span class="badge badge-short">${shortCount} short</span>` : ''}
         </div>
         <div class="sub">${esc(rack.processes.map(p => p.processNo).join(', '))} &middot; ${total} sub parts</div>
         <div class="progress${allPicked ? ' done' : ''}"><strong>${done}/${total}</strong> ${allPicked ? 'all ticked' : 'ticked'}${!allPicked && mode === 'store' ? ' — tick everything to enable Rack Ready' : ''}</div>
@@ -694,40 +733,59 @@ function rackCard(rack, mode) {
   </div>`;
 }
 
-function bindRack(container, mode, rerender) {
+function bindRack(container, mode, cache, renderFromCache) {
   container.querySelectorAll('[data-view]').forEach(b => {
-    b.addEventListener('click', e => { e.stopPropagation(); rackView[b.dataset.rk] = b.dataset.view; rerender(); });
+    b.addEventListener('click', e => { e.stopPropagation(); rackView[b.dataset.rk] = b.dataset.view; renderFromCache(); });
   });
   container.querySelectorAll('[data-proc]').forEach(h => {
     h.addEventListener('click', e => {
       if (e.target.closest('[data-procpick]')) return;
       const k = h.dataset.proc;
       if (collapsed.has(k)) collapsed.delete(k); else collapsed.add(k);
-      rerender();
+      renderFromCache();
     });
   });
+
+  // Select-all on a Process No.: flip every sub part in the cache immediately,
+  // re-render from that (instant), then sync each row to the sheet in the
+  // background. A failed row reverts itself and shows a toast.
   container.querySelectorAll('[data-procpick]').forEach(box => {
-    box.addEventListener('click', async e => {
+    box.addEventListener('click', e => {
       e.stopPropagation();
       const [batchId, robot, processNo] = box.dataset.procpick.split('||');
-      const nowOn = !box.classList.contains('on');
-      box.style.opacity = '.5';
-      try {
-        await api('toggleProcessPick', { batchId, robot, processNo, picked: nowOn });
-        rerender();
-      } catch (err) { showToast('Failed: ' + err.message, true); box.style.opacity = '1'; }
+      const rack = cache.find(r => r.batchId === batchId && r.robot === robot);
+      if (!rack) return;
+      const rows = rack.parts.filter(r => r.ProcessNo === processNo);
+      const allOn = rows.every(r => r.Picked === true || r.Picked === 'TRUE');
+      const nowOn = !allOn;
+      rows.forEach(r => { r.Picked = nowOn; });
+      renderFromCache();
+      rows.forEach(r => {
+        api('toggleSubPick', { rowId: r.RowID, picked: nowOn }).catch(err => {
+          r.Picked = !nowOn; // revert just this row
+          renderFromCache();
+          showToast('Failed to save ' + r.SubPartCode + ': ' + err.message, true);
+        });
+      });
     });
   });
+
+  // Tick one sub part: flip in the cache, re-render instantly, sync in the background.
   container.querySelectorAll('[data-pick]').forEach(row => {
-    row.addEventListener('click', async () => {
-      const nowOn = !row.classList.contains('picked');
-      row.style.opacity = '.5';
-      try {
-        await api('toggleSubPick', { rowId: row.dataset.pick, picked: nowOn });
-        rerender();
-      } catch (err) { showToast('Failed: ' + err.message, true); row.style.opacity = '1'; }
+    row.addEventListener('click', () => {
+      const r = findRowInCache(cache, row.dataset.pick);
+      if (!r) return;
+      const nowOn = !(r.Picked === true || r.Picked === 'TRUE');
+      r.Picked = nowOn;
+      renderFromCache();
+      api('toggleSubPick', { rowId: r.RowID, picked: nowOn }).catch(err => {
+        r.Picked = !nowOn;
+        renderFromCache();
+        showToast('Failed to save: ' + err.message, true);
+      });
     });
   });
+
   if (mode === 'store') {
     container.querySelectorAll('[data-toggle]').forEach(b => {
       b.addEventListener('click', e => { e.stopPropagation(); document.getElementById('rev-' + b.dataset.toggle).classList.toggle('open'); });
@@ -745,7 +803,7 @@ function bindRack(container, mode, rerender) {
         try {
           await api('reviseQty', { rowId:id, issuedQty:qty, remark });
           showToast('Shortage flagged');
-          rerender();
+          renderStore();
         } catch (err) { showToast('Failed: ' + err.message, true); }
       });
     });
@@ -762,27 +820,32 @@ async function renderStore() {
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
     const data = await api('getRacks', { date });
-    const racks = data.racks.filter(r => r.status === 'Pending')
-      .map(r => ({ ...r, parts:r.rows }));
-    if (!racks.length) { el.innerHTML = '<div class="empty-state">Nothing pending. All racks done.</div>'; return; }
-    el.innerHTML = racks.map(r => rackCard(r,'store')).join('');
-    bindRack(el, 'store', renderStore);
-
-    el.querySelectorAll('[data-ready]').forEach(b => {
-      b.addEventListener('click', async () => {
-        const by = document.getElementById('store-name').value.trim();
-        if (!by) { showToast('Enter your name first', true); return; }
-        b.disabled = true;
-        try {
-          await api('markRackReady', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
-          showToast(b.dataset.robot + ' rack sent to collect');
-          renderStore();
-        } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
-      });
-    });
+    storeRacksCache = data.racks.filter(r => r.status === 'Pending')
+      .map(r => decorateClient({ ...r, parts:r.rows }));
+    renderStoreFromCache();
   } catch (err) {
     el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
   }
+}
+
+function renderStoreFromCache() {
+  const el = document.getElementById('store-list');
+  if (!storeRacksCache.length) { el.innerHTML = '<div class="empty-state">Nothing pending. All racks done.</div>'; return; }
+  el.innerHTML = storeRacksCache.map(r => rackCard(r,'store')).join('');
+  bindRack(el, 'store', storeRacksCache, renderStoreFromCache);
+
+  el.querySelectorAll('[data-ready]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const by = document.getElementById('store-name').value.trim();
+      if (!by) { showToast('Enter your name first', true); return; }
+      b.disabled = true;
+      try {
+        await api('markRackReady', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
+        showToast(b.dataset.robot + ' rack sent to collect');
+        renderStore();
+      } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
+    });
+  });
 }
 
 /* ---------------- collect ---------------- */
@@ -795,31 +858,37 @@ async function renderCollect() {
   el.innerHTML = '<div class="loading">Loading...</div>';
   try {
     const data = await api('getRacks', { date });
-    const racks = data.racks.filter(r => r.status === 'Ready').map(r => ({ ...r, parts:r.rows }));
-    if (!racks.length) { el.innerHTML = '<div class="empty-state">No racks ready yet.</div>'; return; }
-
-    const totalShort = racks.reduce((n,r) => n + r.shortCount, 0);
-    const banner = totalShort ? `<div class="alert-banner"><strong>${totalShort} sub part(s) short.</strong>
-      Store revised the qty — check the red notes before collecting.</div>` : '';
-
-    el.innerHTML = banner + racks.map(r => rackCard(r,'collect')).join('');
-    bindRack(el, 'collect', renderCollect);
-
-    el.querySelectorAll('[data-collect]').forEach(b => {
-      b.addEventListener('click', async () => {
-        const by = document.getElementById('collect-name').value.trim();
-        if (!by) { showToast('Enter your name first', true); return; }
-        b.disabled = true;
-        try {
-          await api('markRackCollected', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
-          showToast(b.dataset.robot + ' rack collected');
-          renderCollect();
-        } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
-      });
-    });
+    collectRacksCache = data.racks.filter(r => r.status === 'Ready')
+      .map(r => decorateClient({ ...r, parts:r.rows }));
+    renderCollectFromCache();
   } catch (err) {
     el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
   }
+}
+
+function renderCollectFromCache() {
+  const el = document.getElementById('collect-list');
+  if (!collectRacksCache.length) { el.innerHTML = '<div class="empty-state">No racks ready yet.</div>'; return; }
+
+  const totalShort = collectRacksCache.reduce((n,r) => n + r.parts.filter(isShort).length, 0);
+  const banner = totalShort ? `<div class="alert-banner"><strong>${totalShort} sub part(s) short.</strong>
+    Store revised the qty — check the red notes before collecting.</div>` : '';
+
+  el.innerHTML = banner + collectRacksCache.map(r => rackCard(r,'collect')).join('');
+  bindRack(el, 'collect', collectRacksCache, renderCollectFromCache);
+
+  el.querySelectorAll('[data-collect]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const by = document.getElementById('collect-name').value.trim();
+      if (!by) { showToast('Enter your name first', true); return; }
+      b.disabled = true;
+      try {
+        await api('markRackCollected', { batchId:b.dataset.batch, robot:b.dataset.robot, by });
+        showToast(b.dataset.robot + ' rack collected');
+        renderCollect();
+      } catch (err) { showToast('Failed: ' + err.message, true); b.disabled = false; }
+    });
+  });
 }
 
 /* ---------------- history ---------------- */
