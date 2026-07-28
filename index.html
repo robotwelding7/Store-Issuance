@@ -624,18 +624,26 @@ rememberName('collect-name','wip_picker');
 
 /* ---------------- badges ---------------- */
 
+// Filled by refreshBadges - used to warn about work sitting on other dates.
+let OUTSTANDING = { pending:{ total:0, byDate:{} }, ready:{ total:0, byDate:{} } };
+
 /**
- * Pass `racks` in when the caller has just fetched them for today - loadStore
- * and loadCollect already hold exactly this data, and refetching it was
- * doubling the wait on every tab open.
+ * Counts every unfinished rack on every date, not just the one on screen.
+ * A rack left over from yesterday still needs doing, so the badge has to
+ * show it - otherwise an empty list on today's date looks like "all clear".
  */
-async function refreshBadges(racks) {
+async function refreshBadges() {
   try {
-    const data = racks ? { racks } : await api('getRacks', { date: todayStr() });
-    const pending = data.racks.filter(r => r.status === 'Pending').length;
-    const ready = data.racks.filter(r => r.status === 'Ready').length;
-    setBadge('store', pending);
-    setBadge('collect', ready);
+    const data = await api('getOutstanding');
+    // Defensive: an older Code.gs, or any partial response, must not wipe the
+    // shape out from under the render code.
+    OUTSTANDING = {
+      pending: data.pending || { total:0, byDate:{} },
+      ready:   data.ready   || { total:0, byDate:{} }
+    };
+    setBadge('store', OUTSTANDING.pending.total || 0);
+    setBadge('collect', OUTSTANDING.ready.total || 0);
+    maybeChime(OUTSTANDING.pending.total || 0, OUTSTANDING.ready.total || 0);
   } catch (e) { /* badge is cosmetic - never block the app on it */ }
 }
 function setBadge(tab, n) {
@@ -644,6 +652,50 @@ function setBadge(tab, n) {
   const base = btn.dataset.label || btn.textContent.trim().split(' ')[0];
   btn.dataset.label = base;
   btn.innerHTML = esc(base) + (n > 0 ? ` <span class="dot">${n}</span>` : '');
+}
+
+/* ---------------- alert sound ---------------- */
+
+let audioCtx = null;
+let lastCounts = null;   // null until the first poll, so opening the app is silent
+
+function beep(at, freq, dur) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(freq, at);
+  gain.gain.setValueAtTime(0.0001, at);
+  gain.gain.exponentialRampToValueAtTime(0.22, at + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(at); osc.stop(at + dur + 0.02);
+}
+
+/** Three rising notes, repeated - runs about 4 seconds. */
+function playAlert() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0 = audioCtx.currentTime + 0.05;
+    for (let i = 0; i < 3; i++) {
+      const t = t0 + i * 1.3;
+      beep(t, 880, 0.16);
+      beep(t + 0.2, 1175, 0.16);
+      beep(t + 0.4, 1568, 0.3);
+    }
+  } catch (e) { /* browser blocked audio - not worth interrupting the user over */ }
+}
+
+/**
+ * Only sounds when a count has actually gone UP. Chiming on every poll would
+ * fire every 10 minutes whether or not anything happened, and staff would
+ * learn to ignore it.
+ */
+function maybeChime(pending, ready) {
+  if (lastCounts === null) { lastCounts = { pending, ready }; return; }
+  const rose = pending > lastCounts.pending || ready > lastCounts.ready;
+  lastCounts = { pending, ready };
+  if (rose) playAlert();
 }
 
 // Nothing pushes updates to an idle tab, so without this the badge only
@@ -1168,6 +1220,41 @@ function findRow(cache, rowId) {
 }
 
 /**
+ * Builds the "there's work on another date" notice. Without this an empty list
+ * on today's date reads as "all clear" even when yesterday's racks are still
+ * open - which is exactly how outstanding work goes unnoticed.
+ */
+function otherDateNotice(bucket, currentDate, tab) {
+  const byDate = (bucket && bucket.byDate) || {};
+  const dates = Object.keys(byDate)
+    .filter(d => d && d !== currentDate && byDate[d] > 0)
+    .sort();
+  if (!dates.length) return '';
+
+  const total = dates.reduce((n, d) => n + byDate[d], 0);
+  const list = dates.map(d =>
+    `<button class="link-btn" data-jump="${esc(d)}" data-tab="${esc(tab)}"
+       style="font-size:13px;">${esc(d)} (${byDate[d]})</button>`
+  ).join(' &middot; ');
+
+  return `<div class="alert-banner">
+    <strong>${total} rack(s) still open on another date.</strong>
+    Nothing here for the date shown, but this work is not finished yet.<br>
+    Jump to: ${list}
+  </div>`;
+}
+
+/** Wires the date links in that notice. */
+function bindJumps(container) {
+  container.querySelectorAll('[data-jump]').forEach(b =>
+    b.addEventListener('click', () => {
+      const tab = b.dataset.tab;
+      document.getElementById(tab + '-date').value = b.dataset.jump;
+      if (tab === 'store') loadStore(true); else loadCollect(true);
+    }));
+}
+
+/**
  * Ticks update the cache and re-render immediately, then sync to the sheet in
  * the background — that's what removes the loading flash on every tap. A
  * failed write reverts just that row and says so.
@@ -1235,7 +1322,7 @@ function bindRack(container, mode, cache, rerender, reload) {
           const res = await api('flagShortage', { rowId:id, issuedQty:qty, remark });
           if (res.success === false) { showToast(res.error, true); return; }
           showToast('Shortage flagged — picker will decide');
-          await reload();
+          await reload(true);
         } catch (err) {
           showToast('Failed: ' + err.message, true);
         } finally {
@@ -1274,8 +1361,7 @@ async function loadStore(force) {
     storeCache = data.racks.filter(r => r.status === 'Pending').map(relink);
     storeCacheDate = date;
     renderStore();
-    if (date === todayStr()) refreshBadges(data.racks);
-    else refreshBadges();
+    refreshBadges();
   } catch (err) {
     if (!hasStale) el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
     else showToast('Could not refresh: ' + err.message, true);
@@ -1285,8 +1371,16 @@ document.getElementById('btn-store-refresh').addEventListener('click', () => loa
 
 function renderStore() {
   const el = document.getElementById('store-list');
-  if (!storeCache.length) { el.innerHTML = '<div class="empty-state">Nothing pending. All racks done.</div>'; return; }
-  el.innerHTML = storeCache.map(r => rackCard(r,'store')).join('');
+  const date = document.getElementById('store-date').value;
+  if (!storeCache.length) {
+    el.innerHTML = otherDateNotice(OUTSTANDING.pending, date, 'store') +
+      '<div class="empty-state">Nothing pending for this date.</div>';
+    bindJumps(el);
+    return;
+  }
+  el.innerHTML = otherDateNotice(OUTSTANDING.pending, date, 'store') +
+    storeCache.map(r => rackCard(r,'store')).join('');
+  bindJumps(el);
   bindRack(el, 'store', storeCache, renderStore, loadStore);
 
   el.querySelectorAll('[data-ready]').forEach(b =>
@@ -1331,8 +1425,7 @@ async function loadCollect(force) {
     collectCache = data.racks.filter(r => r.status === 'Ready').map(relink);
     collectCacheDate = date;
     renderCollect();
-    if (date === todayStr()) refreshBadges(data.racks);
-    else refreshBadges();
+    refreshBadges();
   } catch (err) {
     if (!hasStale) el.innerHTML = '<div class="empty-state">Failed: ' + esc(err.message) + '</div>';
     else showToast('Could not refresh: ' + err.message, true);
@@ -1342,21 +1435,44 @@ document.getElementById('btn-collect-refresh').addEventListener('click', () => l
 
 function renderCollect() {
   const el = document.getElementById('collect-list');
-  if (!collectCache.length) { el.innerHTML = '<div class="empty-state">No racks ready yet.</div>'; return; }
+  const date = document.getElementById('collect-date').value;
+  const other = otherDateNotice(OUTSTANDING.ready, date, 'collect');
+
+  if (!collectCache.length) {
+    el.innerHTML = other + '<div class="empty-state">No racks ready for this date.</div>';
+    bindJumps(el);
+    return;
+  }
 
   const needing = collectCache.filter(r => r.needsDecision).length;
   const totalShort = collectCache.reduce((n,r) => n + r.parts.filter(isShort).length, 0);
   let banner = '';
   if (needing) {
-    banner = `<div class="alert-banner"><strong>${needing} rack(s) waiting on your decision.</strong>
-      Store is short on stock — choose what to do before collecting.</div>`;
+    banner = `<div class="alert-banner" id="decision-banner" style="cursor:pointer;">
+      <strong>${needing} rack(s) waiting on your decision.</strong>
+      Store is short on stock — choose what to do before collecting.<br>
+      <span style="text-decoration:underline; font-weight:600;">Tap to jump to the first one</span>
+    </div>`;
   } else if (totalShort) {
     banner = `<div class="alert-banner"><strong>${totalShort} sub part(s) short.</strong>
       Check the red notes before collecting.</div>`;
   }
 
-  el.innerHTML = banner + collectCache.map(r => rackCard(r,'collect')).join('');
+  el.innerHTML = other + banner + collectCache.map(r => rackCard(r,'collect')).join('');
+  bindJumps(el);
   bindRack(el, 'collect', collectCache, renderCollect, loadCollect);
+
+  // Tapping the warning scrolls to the rack that needs deciding, rather than
+  // leaving the picker to scroll a long list looking for it.
+  const db = document.getElementById('decision-banner');
+  if (db) {
+    db.addEventListener('click', () => {
+      const first = collectCache.find(r => r.needsDecision);
+      if (!first) return;
+      const card = el.querySelector(`[data-rackkey="${CSS.escape(rackKey(first))}"]`);
+      if (card) card.scrollIntoView({ behavior:'smooth', block:'start' });
+    });
+  }
 
   el.querySelectorAll('[data-dec]').forEach(b =>
     b.addEventListener('click', async () => {
@@ -1377,7 +1493,9 @@ function renderCollect() {
         if (type === 'cancel') showToast(b.dataset.robot + ' cancelled — you can submit a new picklist for it');
         else if (type === 'drop') showToast(b.dataset.proc + ' dropped — rack sent back to store');
         else showToast(b.dataset.proc + ' set to ' + res.buildable + ' unit — rack sent back to store');
-        await loadCollect();
+        // The decision changed server data, so bypass the cache - otherwise the
+        // rack stays on screen even though it has rebounded to Store.
+        await loadCollect(true);
       } catch (err) {
         showToast('Failed: ' + err.message, true);
       } finally {
