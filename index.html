@@ -1815,8 +1815,11 @@ document.getElementById('btn-save-parent').addEventListener('click', async () =>
 
 /* ---------------- init ---------------- */
 
-if (API_URL.indexOf('PASTE_YOUR') !== -1) {
-  showToast('API_URL is not set yet — edit it at the top of this file', true);
+// Plain string check, no regex: a valid value must be a script.google.com
+// URL ending in /exec. This also catches the URL being pasted into the wrong
+// line, which silently disabled this warning once before.
+if (API_URL.indexOf('script.google.com') === -1 || API_URL.slice(-5) !== '/exec') {
+  showToast('API_URL looks wrong - check the line at the top of this file', true);
 }
 
 // Nothing is fetched until there's a session. If a stored token is still
