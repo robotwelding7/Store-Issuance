@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WIP Store Picklist</title>
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="googlebot" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
 <link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAZElEQVR42mNgwAHk4nv+UxMzEAOobSlJjqGX5VgdQW/LMRwxsh0wUJbDHYFPEh8gR92oA0YdMOqAoeeAAS+IRh1AbNy+aJfDiUcdMOqAUQcM/nJgtFU8KBww4F2zQdE5HajuOQAiPgKAfzao6AAAAABJRU5ErkJggg==">
 <link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAACf0lEQVR42u3bwQ2CUBRFwV8JrVmOGwq1C40dGIzmcZiXnD1cZstaw2677U+dp3X1gwB4iAU3xIIbZIENsmKwfRAlUPsIysA2vDKoDa4MakMrg9rAyqA2rDKoDaoMakMqg9qASqE2njKgDacMaoMphdpYyoA2lFKojaQMaAMphdo4AlqaCNowSqE2ioCWJoI2iFKojSGgJaAloCWgBbQEtDQKtCGUQm0EAS0BLQEtAS2gJaB/3VnuSu8LNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw20BLSANoKAloCWgJaAFtAS0BLQEtAS0AJaAloCWgJaAlpAS0D7BevLHvdtfEADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMNNNBAAw000EADDTTQQAMN9BHQ75v+kNLHmIEW0BLQEtAS0ALaIAJaGgkaaqUwAy2gpcmgoVYKM9ACWpoMGmqlMAOtHGiolcIMtHKgoVYKM9TKYQZaOdBQK4UZauUwQ60cZqiVwwy1cpihVg4z1Mphhlo5zGArBxlqJTGDrRxksJWEDLeSiOFWFjHwwP7rXiIt6USzABqRAAAAAElFTkSuQmCC">
 <link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAZElEQVR42mNgwAHk4nv+UxMzEAOobSlJjqGX5VgdQW/LMRwxsh0wUJbDHYFPEh8gR92oA0YdMOqAoeeAAS+IRh1AbNy+aJfDiUcdMOqAUQcM/nJgtFU8KBww4F2zQdE5HajuOQAiPgKAfzao6AAAAABJRU5ErkJggg==">
@@ -444,9 +447,14 @@
 <script>
 // ============ CONFIGURE THIS ============
 // Must be one single line, in quotes, ending in /exec
-const API_URL = 'https://script.google.com/macros/s/AKfycbwEp09uwArQzYddHqcmZ0b6WToz9kP4oifsyrehQ3jMnwm_2WdhZz0hMGW6ZJ22TSGh9g/exec';
-const DATABANK_PIN = '1234';
+const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+// Passwords and the databank PIN now live in Code.gs, on the server.
+// Nothing secret belongs in this file - it is served from a public repo,
+// so anything written here can be read by anyone viewing the page source.
 // ========================================
+
+let TOKEN = null;
+try { TOKEN = localStorage.getItem('wip_token'); } catch (e) {}
 
 /* ---------------- helpers ---------------- */
 
@@ -506,9 +514,19 @@ async function api(action, params = {}) {
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(Object.assign({ action }, params))
+    body: JSON.stringify(Object.assign({ action, token: TOKEN }, params))
   });
   const data = await res.json();
+
+  // The server rejects anything without a live session. Rather than every
+  // caller handling that, drop the dead token and put the sign-in back up.
+  if (data.authRequired) {
+    TOKEN = null;
+    try { localStorage.removeItem('wip_token'); } catch (e) {}
+    showRoleChooser();
+    throw new Error(data.error || 'Session expired');
+  }
+
   if (!data.success && !data.duplicate) throw new Error(data.error || 'Request failed');
   return data;
 }
@@ -521,12 +539,13 @@ const ROLE_TABS = {
   both:   ['create','store','collect','history']
 };
 const ROLE_LABEL = { picker:'Picker', store:'Store', both:'Supervisor' };
-// Same caveat as the databank PIN: this lives in client-side code and can be
-// read via "View Source" in seconds. It's a guard against picking the wrong
-// role by mistake, not real access control.
-const ROLE_PASSWORDS = { picker:'Picker1', store:'Store1', both:'Supervisor1' };
 let ROLE = null;
 try { ROLE = localStorage.getItem('wip_role'); } catch (e) {}
+
+function showRoleChooser() {
+  document.getElementById('role-pw-back').classList.remove('open');
+  document.getElementById('role-back').classList.add('open');
+}
 
 function applyRole(role) {
   ROLE = role;
@@ -541,6 +560,8 @@ function applyRole(role) {
   });
   document.getElementById('role-back').classList.remove('open');
   if (first) first.click();
+  loadRobots();
+  loadProcessCache(true);
   refreshBadges();
 }
 
@@ -555,23 +576,38 @@ document.querySelectorAll('#role-back [data-role]').forEach(b =>
     setTimeout(() => document.getElementById('role-pw-input').focus(), 50);
   }));
 
-function tryRolePassword() {
+async function tryRolePassword() {
   const el = document.getElementById('role-pw-input');
-  if (el.value === ROLE_PASSWORDS[pendingRole]) {
+  const btn = document.getElementById('btn-role-pw-ok');
+  const password = el.value;
+  if (!password) { showToast('Enter the password', true); return; }
+
+  btn.disabled = true; btn.textContent = 'Checking...';
+  try {
+    // The password is checked on the server; this file never holds it.
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'login', role: pendingRole, password })
+    }).then(r => r.json());
+
+    if (!res.success) { el.value = ''; showToast(res.error || 'Wrong password', true); return; }
+
+    TOKEN = res.token;
+    try { localStorage.setItem('wip_token', TOKEN); } catch (e) {}
     el.value = '';
     document.getElementById('role-pw-back').classList.remove('open');
+    unlockAudio();   // this click is a real user gesture - use it (see playAlert)
     applyRole(pendingRole);
-  } else {
-    el.value = '';
-    showToast('Wrong password', true);
+  } catch (err) {
+    showToast('Could not sign in: ' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Continue';
   }
 }
 document.getElementById('btn-role-pw-ok').addEventListener('click', tryRolePassword);
 document.getElementById('role-pw-input').addEventListener('keydown', e => { if (e.key === 'Enter') tryRolePassword(); });
-document.getElementById('btn-role-pw-cancel').addEventListener('click', () => {
-  document.getElementById('role-pw-back').classList.remove('open');
-  document.getElementById('role-back').classList.add('open');
-});
+document.getElementById('btn-role-pw-cancel').addEventListener('click', showRoleChooser);
 
 document.getElementById('btn-change-role').addEventListener('click', () =>
   document.getElementById('role-back').classList.add('open'));
@@ -589,18 +625,23 @@ document.getElementById('btn-pin-cancel').addEventListener('click', () =>
 document.getElementById('btn-pin-ok').addEventListener('click', tryPin);
 document.getElementById('pin-input').addEventListener('keydown', e => { if (e.key === 'Enter') tryPin(); });
 
-function tryPin() {
+async function tryPin() {
   const el = document.getElementById('pin-input');
-  if (el.value === DATABANK_PIN) {
+  const btn = document.getElementById('btn-pin-ok');
+  btn.disabled = true; btn.textContent = 'Checking...';
+  try {
+    await api('checkDatabankPin', { pin: el.value });
     el.value = '';
     document.getElementById('pin-back').classList.remove('open');
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
     document.getElementById('tab-databank').style.display = 'block';
     loadDatabank();
-  } else {
+  } catch (err) {
     el.value = '';
-    showToast('Wrong PIN', true);
+    showToast(err.message || 'Wrong PIN', true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Open';
   }
 }
 
@@ -657,7 +698,22 @@ function setBadge(tab, n) {
 /* ---------------- alert sound ---------------- */
 
 let audioCtx = null;
+let audioBlocked = false;
 let lastCounts = null;   // null until the first poll, so opening the app is silent
+
+/**
+ * Browsers refuse to start audio unless a real user gesture has happened.
+ * The 10-minute poll is not a gesture, so a tab left sitting idle would be
+ * silent at exactly the moment the alert matters. This is called from the
+ * sign-in click - a genuine gesture - so the context is already running by
+ * the time a poll needs it.
+ */
+function unlockAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { audioBlocked = true; }
+}
 
 function beep(at, freq, dur) {
   const osc = audioCtx.createOscillator();
@@ -673,17 +729,46 @@ function beep(at, freq, dur) {
 
 /** Three rising notes, repeated - runs about 4 seconds. */
 function playAlert() {
+  let sounded = false;
   try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    const t0 = audioCtx.currentTime + 0.05;
-    for (let i = 0; i < 3; i++) {
-      const t = t0 + i * 1.3;
-      beep(t, 880, 0.16);
-      beep(t + 0.2, 1175, 0.16);
-      beep(t + 0.4, 1568, 0.3);
+    unlockAudio();
+    if (audioCtx && audioCtx.state === 'running') {
+      const t0 = audioCtx.currentTime + 0.05;
+      for (let i = 0; i < 3; i++) {
+        const t = t0 + i * 1.3;
+        beep(t, 880, 0.16);
+        beep(t + 0.2, 1175, 0.16);
+        beep(t + 0.4, 1568, 0.3);
+      }
+      sounded = true;
     }
-  } catch (e) { /* browser blocked audio - not worth interrupting the user over */ }
+  } catch (e) { /* fall through to the visual alert */ }
+
+  // If the browser wouldn't play anything, the alert still has to land -
+  // silently swallowing it would mean staff miss the rack entirely.
+  if (!sounded) { audioBlocked = true; flashTitle(); }
+}
+
+/**
+ * Visual fallback: flash the tab title so an idle tab still shows something
+ * changed, even with no sound. Stops on the next click anywhere in the page.
+ */
+let titleTimer = null;
+function flashTitle() {
+  const original = 'WIP Store Picklist';
+  if (titleTimer) return;
+  let on = false;
+  titleTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? '\u25CF NEW RACK - WIP Store Picklist' : original;
+  }, 900);
+  const stop = () => {
+    clearInterval(titleTimer);
+    titleTimer = null;
+    document.title = original;
+    document.removeEventListener('click', stop);
+  };
+  document.addEventListener('click', stop);
 }
 
 /**
@@ -1733,10 +1818,12 @@ document.getElementById('btn-save-parent').addEventListener('click', async () =>
 if (API_URL.indexOf('PASTE_YOUR') !== -1) {
   showToast('API_URL is not set yet — edit it at the top of this file', true);
 }
-loadRobots();
-loadProcessCache();
-if (ROLE) applyRole(ROLE);
-else document.getElementById('role-back').classList.add('open');
+
+// Nothing is fetched until there's a session. If a stored token is still
+// good, applyRole picks the data up; if the server has since expired it,
+// the first call comes back authRequired and api() puts the sign-in back up.
+if (TOKEN && ROLE) applyRole(ROLE);
+else showRoleChooser();
 </script>
 
 </body>
